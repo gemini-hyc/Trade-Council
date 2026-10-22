@@ -1,0 +1,8 @@
+quant_data_root: "~/quant-data"
+contract_path: "~/quant-data/DATA_CONTRACT.md"
+registry_path: "configs/datasets.yaml"
+asof_timezone: "Asia/Shanghai"
+default_cutoff: "23:59:59"
+news_default_enabled: false
+quant_db_enabled: false
+

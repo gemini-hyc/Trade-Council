@@ -1,0 +1,92 @@
+providers:
+  ollama:
+    kind: ollama
+    base_url: http://127.0.0.1:11434/v1
+    api_key_env: OLLAMA_API_KEY
+    default_api_key: local
+    models:
+      - id: qwen2.5:14b
+        input_price_per_mtok: 0
+        output_price_per_mtok: 0
+      - id: qwen3.8:27b
+        input_price_per_mtok: 0
+        output_price_per_mtok: 0
+      - id: qwen3.5:35b
+        input_price_per_mtok: 0
+        output_price_per_mtok: 0
+      - id: llama3.1:8b
+        input_price_per_mtok: 0
+        output_price_per_mtok: 0
+      - id: nomic-embed-text:latest
+        input_price_per_mtok: 0
+        output_price_per_mtok: 0
+
+  deepseek:
+    kind: deepseek
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    models:
+      - id: deepseek-flash
+      - id: deepseek-v4-pro
+
+profiles:
+  batch:
+    display_name: 批量研究（本地分支）
+    provider: ollama
+    models:
+      extraction: qwen2.5:14b
+      analysis: qwen2.5:14b
+      debate: qwen2.5:14b
+      judge: qwen2.5:14b
+    debate_rounds: 1
+    max_concurrency: 3
+    max_tokens: 1200
+    request_timeout_seconds: 300
+    reasoning_effort: none
+    allow_trade_instructions: false
+    budget:
+      currency: CNY
+      max_run_cost: 0
+      on_exceed: warn
+
+  deep:
+    display_name: 个股精读（主线）
+    provider: deepseek
+    deep_tier: auto
+    allow_flash_fallback: false
+    tier_models:
+      flash: deepseek-flash
+      pro: deepseek-v4-pro
+    models:
+      extraction: deepseek-flash
+      analysis: deepseek-v4-pro
+      debate: deepseek-v4-pro
+      judge: deepseek-v4-pro
+    debate_rounds: 2
+    max_concurrency: 1
+    max_tokens: 6000
+    request_timeout_seconds: 300
+    reasoning_effort: medium
+    allow_trade_instructions: true
+    budget:
+      currency: USD
+      max_run_cost: null
+      on_exceed: warn
+
+role_categories:
+  market-analyst: analysis
+  fundamentals-analyst: analysis
+  news-analyst: extraction
+  sentiment-analyst: analysis
+  bull-researcher: debate
+  bear-researcher: debate
+  research-manager: judge
+  trader: judge
+  aggressive-risk-analyst: analysis
+  conservative-risk-analyst: analysis
+  neutral-risk-analyst: analysis
+  risk-manager: judge
+
+cloud_policy:
+  allowed_providers: [deepseek]
+  denied_providers: [glm, scnet, anthropic, openai]

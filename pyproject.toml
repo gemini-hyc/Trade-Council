@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trade-council"
+version = "0.1.0"
+description = "Local, auditable, extensible multi-role investment research workbench."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2,<3",
+  "pandas>=3,<4",
+  "pydantic>=2.8,<3",
+  "pyarrow>=20,<30",
+  "PyYAML>=6,<7",
+]
+
+[project.scripts]
+trade-council = "trade_council.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.10,<2",
+  "pytest>=8,<9",
+  "ruff>=0.5,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["src/trade_council/engineering/datapack.py"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+exclude = ["src/trade_council/engineering/datapack.py"]
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*", "pandas", "pandas.*", "pyarrow", "pyarrow.*", "yaml"]
+ignore_missing_imports = true
+follow_imports = "skip"

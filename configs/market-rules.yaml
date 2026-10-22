@@ -1,0 +1,14 @@
+markets:
+  CN:
+    t_plus_one: true
+    boards:
+      main:
+        lot_size: 100
+        step: 100
+      star:
+        lot_size: 200
+        step: 1
+      bj:
+        lot_size: 100
+        step: 1
+

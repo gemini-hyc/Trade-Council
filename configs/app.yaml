@@ -1,0 +1,7 @@
+name: Trade-Council
+version: 0.1.0
+run_dir: runs
+default_mode: full
+default_profile: batch
+log_level: INFO
+

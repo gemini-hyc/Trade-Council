@@ -1,0 +1,5 @@
+normal_run_days: 30
+failed_run_days: 14
+datapack_days: 7
+export_days: 90
+keep_latest: 10

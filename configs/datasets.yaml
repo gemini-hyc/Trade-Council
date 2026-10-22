@@ -1,0 +1,253 @@
+version: "1.0.0"
+
+datasets:
+  - id: market.daily
+    label: 日线行情
+    path: market/daily
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 0
+    publish_time_local: "15:00:00"
+    timezone: Asia/Shanghai
+    asof_cutoff: "23:59:59"
+    required: true
+    enabled: true
+    fields: [date, code, open, high, low, close, preclose, volume, amount, turn, pctChg, stock_name]
+    known_traps: ["复权价与未复权价混用", "指数行混入个股表"]
+
+  - id: market.adj_factor
+    label: 复权因子
+    path: adj_factor
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 0
+    required: true
+    enabled: true
+    fields: [date, code, ts_code, adj_factor]
+    known_traps: ["缺失时不能把未复权价当复权价"]
+
+  - id: market.daily_basic
+    label: 每日估值
+    path: daily_basic
+    time_field: trade_date
+    available_at_field: trade_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, trade_date, close, turnover_rate, pe_ttm, pb, ps_ttm, total_mv, circ_mv]
+    known_traps: ["历史缺列", "估值需看历史分位"]
+
+  - id: market.moneyflow
+    label: 个股资金流
+    path: moneyflow
+    time_field: trade_date
+    available_at_field: trade_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, trade_date, buy_lg_amount, sell_lg_amount, buy_elg_amount, sell_elg_amount, net_mf_amount]
+    known_traps: ["moneyflow 金额单位为万元", "主力净额与 net_mf_amount 不可混用"]
+
+  - id: sentiment.margin_detail
+    label: 两融明细
+    path: sentiment/margin_detail
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 1
+    publish_time_local: "18:30:00"
+    timezone: Asia/Shanghai
+    asof_cutoff: "23:59:59"
+    required: false
+    enabled: true
+    fields: [date, code, ts_code, rzye, rqye, rzrqye]
+    known_traps:
+      - "T+1 发布"
+      - "ETF 与个股混表"
+      - "rqye 为派生字段，NaN 时按 rzye+rqye.fillna(0) 重建"
+    rebuild_rules:
+      - "rzrqye = rzrqye.fillna(rzye + rqye.fillna(0))"
+
+  - id: sentiment.top_list
+    label: 龙虎榜
+    path: sentiment/top_list
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 1
+    publish_time_local: "18:30:00"
+    timezone: Asia/Shanghai
+    asof_cutoff: "23:59:59"
+    required: false
+    enabled: true
+    fields: [date, code, ts_code, name, close, pct_change, net_amount, reason]
+    known_traps: ["同股双名称重复行", "单位元"]
+    verification_status: conservative_pending
+
+  - id: sentiment.block_trade
+    label: 大宗交易
+    path: sentiment/block_trade
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 1
+    publish_time_local: "18:30:00"
+    timezone: Asia/Shanghai
+    required: false
+    enabled: true
+    fields: [date, code, ts_code, price, vol, amount, buyer, seller]
+    known_traps:
+      - "股票/B股/北交所/基金与债券单位不同"
+      - "源端同参数多笔重复行是合法数据"
+      - "跨证券类型不可直接求和"
+    verification_status: conservative_pending
+
+  - id: sentiment.hsgt_top10
+    label: 北向前十大
+    path: sentiment/hsgt_top10
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 1
+    publish_time_local: "18:30:00"
+    timezone: Asia/Shanghai
+    required: false
+    enabled: true
+    fields: [date, code, ts_code, name, amount, net_amount]
+    known_traps:
+      - "固定 20 行"
+      - "2024-08-19 后 net_amount 恒为 NULL"
+      - "港股假期前夜可能合法为空"
+    caliber_breakpoints:
+      - date: "2024-08-19"
+        description: "北向披露口径变化"
+    field_availability:
+      - field: net_amount
+        available_to: "2024-08-18"
+        quality: unavailable_after_breakpoint
+      - field: amount
+        quality: usable_but_caliber_changed
+
+  - id: sentiment.hk_hold
+    label: 沪深港通持股
+    path: sentiment/hk_hold
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 1
+    required: false
+    enabled: true
+    semantic_fields:
+      - name: northbound_holdings
+        available_to: "2024-08-18"
+        quality: unavailable_after_breakpoint
+    known_traps: ["2024-08-19 后只剩 HK，不能当北向持 A 股"]
+    caliber_breakpoints:
+      - date: "2024-08-19"
+        description: "exchange 只保留 HK"
+
+  - id: financial.income
+    label: 利润表
+    path: financial_statements/income
+    time_field: end_date
+    available_at_field: ann_date
+    alternate_available_at_field: f_ann_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, revenue, n_income_attr_p]
+    known_traps: ["累计口径 YTD", "必须按公告日过滤，不可按报告期目录名过滤"]
+
+  - id: financial.balancesheet
+    label: 资产负债表
+    path: financial_statements/balancesheet
+    time_field: end_date
+    available_at_field: ann_date
+    alternate_available_at_field: f_ann_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, total_assets, total_liab]
+    known_traps: ["必须按公告日过滤"]
+
+  - id: financial.cashflow
+    label: 现金流量表
+    path: financial_statements/cashflow
+    time_field: end_date
+    available_at_field: ann_date
+    alternate_available_at_field: f_ann_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, ann_date, f_ann_date, end_date, report_type, n_cashflow_act, free_cashflow]
+    known_traps: ["必须按公告日过滤"]
+
+  - id: reports.forecast
+    label: 业绩预告
+    path: reports/forecast
+    time_field: end_date
+    available_at_field: ann_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, ann_date, end_date, type, net_profit_min, net_profit_max]
+    known_traps: ["个股价时效与数据集时效必须分开检查"]
+
+  - id: reports.express
+    label: 业绩快报
+    path: reports/express
+    time_field: end_date
+    available_at_field: ann_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [ts_code, ann_date, end_date]
+
+  - id: market.announcement
+    label: 公司公告
+    path: market
+    file_glob: "announcement_*.parquet"
+    time_field: publish_date
+    available_at_field: publish_time
+    alternate_available_at_field: publish_date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    known_traps: ["公告可用不等于新闻可用"]
+
+  - id: news.stock_news
+    label: 个股新闻
+    path: news
+    time_field: publish_time
+    available_at_field: publish_time
+    publish_lag_days: 0
+    required: false
+    enabled: false
+    known_traps: ["数据停更", "无权限补充", "默认关闭"]
+
+  - id: market.stk_limit
+    label: 涨跌停价格
+    path: stk_limit
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [date, ts_code, up_limit, down_limit]
+    known_traps: ["不可把涨停价当作可成交价"]
+
+  - id: market.suspend_d
+    label: 停牌记录
+    path: suspend_d
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    fields: [date, ts_code]
+    known_traps: ["缺文件可能是合法无停牌，不应强制要求每个交易日存在"]
+
+  - id: industry.members
+    label: 行业成分快照
+    path: industry/industry_members_daily.parquet
+    time_field: date
+    available_at_field: date
+    publish_lag_days: 0
+    required: false
+    enabled: true
+    known_traps: ["必须使用当日真实成分，禁止最新成分回看历史"]

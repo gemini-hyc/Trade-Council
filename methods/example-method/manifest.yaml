@@ -1,0 +1,17 @@
+id: example-method
+name: Example Prompt Method
+version: 0.1.0
+domain: technical
+type: prompt
+enabled: false
+
+requires:
+  datasets: []
+  fields: []
+
+outputs:
+  schema: schema.json
+  evidence_policy: optional
+
+parameters: {}
+

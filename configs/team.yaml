@@ -1,0 +1,59 @@
+lead:
+  id: lead
+  type: code_orchestrator
+
+methods:
+  example-method:
+    enabled: true
+
+roles:
+  - id: market-analyst
+    stage: phase1
+    domains: [technical]
+    methods: [example-method]
+  - id: fundamentals-analyst
+    stage: phase1
+    domains: [fundamental]
+    methods: []
+  - id: news-analyst
+    stage: phase1
+    domains: [news]
+    methods: []
+    enabled: false
+  - id: sentiment-analyst
+    stage: phase1
+    domains: [sentiment]
+    methods: []
+  - id: bull-researcher
+    stage: phase2
+    domains: [debate]
+    methods: []
+  - id: bear-researcher
+    stage: phase2
+    domains: [debate]
+    methods: []
+  - id: research-manager
+    stage: phase2
+    domains: [decision]
+    methods: []
+  - id: trader
+    stage: phase3
+    domains: [execution]
+    methods: []
+  - id: aggressive-risk-analyst
+    stage: phase4
+    domains: [risk]
+    methods: []
+  - id: conservative-risk-analyst
+    stage: phase4
+    domains: [risk]
+    methods: []
+  - id: neutral-risk-analyst
+    stage: phase4
+    domains: [risk]
+    methods: []
+  - id: risk-manager
+    stage: phase4
+    domains: [risk, decision]
+    methods: []
+

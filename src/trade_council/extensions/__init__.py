@@ -1,0 +1,2 @@
+"""Analysis method extension contracts."""
+

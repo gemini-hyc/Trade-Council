@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture_type": "synthetic",
+  "asof": "2026-10-16",
+  "samples": [
+    {
+      "id": "blue-chip",
+      "ts_code": "600519.SH",
+      "style": "大盘蓝筹",
+      "expected_files": [
+        "manifest.json",
+        "snapshot.json",
+        "DATA_DIGEST.md",
+        "evidence.json",
+        "evidence_trace.jsonl",
+        "price_daily.csv"
+      ]
+    },
+    {
+      "id": "high-volatility-growth",
+      "ts_code": "300750.SZ",
+      "style": "高波动成长",
+      "expected_files": [
+        "manifest.json",
+        "snapshot.json",
+        "DATA_DIGEST.md",
+        "evidence.json",
+        "evidence_trace.jsonl",
+        "price_daily.csv"
+      ]
+    },
+    {
+      "id": "cyclical",
+      "ts_code": "601857.SH",
+      "style": "强周期",
+      "expected_files": [
+        "manifest.json",
+        "snapshot.json",
+        "DATA_DIGEST.md",
+        "evidence.json",
+        "evidence_trace.jsonl",
+        "price_daily.csv"
+      ]
+    }
+  ],
+  "repeatability": {
+    "runs": 10,
+    "schema_pass_rate": 1.0
+  },
+  "decision_consistency": {
+    "status": "not_established",
+    "reason": "尚未积累足量真实模型重复运行样本，不能用任意阈值伪装统计结论"
+  }
+}
