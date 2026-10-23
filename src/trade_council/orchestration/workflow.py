@@ -678,6 +678,7 @@ class WorkflowEngine:
             symbol=str(self.manifest.get("ts_code", "")),
             stock_name=str(self.manifest.get("stock_name") or self.manifest.get("ts_code", "")),
             run_dir=self.store.run_dir,
+            allow_web=self.web_search,
         )
         self.web_supplement_status = str(payload.get("status", "unknown"))
         state["data_needs"] = [item.model_dump() for item in needs]

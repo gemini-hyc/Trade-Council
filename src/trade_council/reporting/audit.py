@@ -29,6 +29,7 @@ def audit_report(
     trade_context: TradeContext | None = None,
     market_rules_path: Path | None = None,
     asof: str | None = None,
+    evidence_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     issues: list[dict[str, str]] = []
 
@@ -106,10 +107,24 @@ def audit_report(
         add("FAIL", "A traceable number has no data-source")
     evidence_path = data_pack_dir / "evidence.json"
     evidence_values: dict[str, Any] = {}
-    if evidence_path.is_file():
+    evidence_records: dict[str, dict[str, Any]] = {}
+    if evidence_items is not None:
+        evidence_values = {
+            str(item.get("evidence_id")): item.get("value")
+            for item in evidence_items
+        }
+        evidence_records = {
+            str(item.get("evidence_id")): item
+            for item in evidence_items
+        }
+    elif evidence_path.is_file():
         evidence_data = json.loads(evidence_path.read_text(encoding="utf-8"))
         evidence_values = {
             str(item.get("evidence_id")): item.get("value")
+            for item in evidence_data.get("items", [])
+        }
+        evidence_records = {
+            str(item.get("evidence_id")): item
             for item in evidence_data.get("items", [])
         }
     traceable_spans = re.findall(
@@ -123,6 +138,12 @@ def audit_report(
     )
     if len(traceable_opens) != len(traceable_spans):
         add("FAIL", "Traceable number markup is malformed")
+    for web_evidence_id, evidence_record in evidence_records.items():
+        if (
+            evidence_record.get("source_level") == "web"
+            and not evidence_record.get("source_url")
+        ):
+            add("FAIL", f"Web evidence has no source_url: {web_evidence_id}")
     for tag, body in zip(traceable_opens, traceable_spans):
         evidence_id = _attr(tag, "data-evidence-id")
         if evidence_id is None:

@@ -143,6 +143,8 @@ def run_summary(run_dir: Path) -> dict[str, Any]:
         "updated_at": state.get("updated_at"),
         "failed_phase": state.get("failed_phase"),
         "error": state.get("error"),
+        "web_supplement_status": (state.get("web_supplement") or {}).get("status"),
+        "data_need_count": len(state.get("data_needs", [])),
         "final_action": decision.get("action"),
         "degraded_from_action": decision.get("degraded_from_action"),
         "decision_data_gaps": decision.get("data_gaps", []),

@@ -420,3 +420,85 @@ def test_report_gate_detects_decision_and_evidence_tampering(tmp_path: Path) -> 
     assert result["verdict"] == "FAIL"
     assert any("Decision field action" in issue["message"] for issue in result["issues"])
     assert any("evidence number was tampered" in issue["message"] for issue in result["issues"])
+
+
+def test_report_displays_task_scoped_supplemental_evidence(tmp_path: Path) -> None:
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    run["data_needs"] = [
+        {
+            "need_id": "need-forecast",
+            "dataset_id": "reports.forecast",
+            "field": "net_profit_min",
+            "priority": "critical",
+        }
+    ]
+    run["web_supplement"] = {
+        "status": "partial",
+        "results": [
+            {
+                "need_id": "need-forecast",
+                "status": "partial",
+                "missing_fields": ["net_profit_max", "change_reason"],
+                "sources": [
+                    {
+                        "title": "外部公告",
+                        "url": "https://example.test/announcement",
+                    }
+                ],
+            }
+        ],
+    }
+    (run_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    (run_dir / "supplemental_evidence.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "snap-test",
+                "items": [
+                    {
+                        "evidence_id": "F-web-test",
+                        "dataset_id": "reports.forecast",
+                        "path": "web_supplement",
+                        "primary_key": "600519.SH",
+                        "event_date": "2026-10-16",
+                        "available_at": "2026-10-16 20:00:00",
+                        "field": "net_profit_min",
+                        "value": 1.0,
+                        "unit": "CNY",
+                        "formula": "task-scoped web search",
+                        "snapshot_id": "snap-test",
+                        "source_hash": None,
+                        "note": "test",
+                        "source_level": "web",
+                        "source_url": "https://example.test/announcement",
+                        "retrieved_at": "2026-10-21T20:00:00",
+                        "extraction_confidence": "high",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit = build_report(run_dir, datapack)
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert 'data-supplement="true"' in html
+    assert "外部公告" in html
+    assert "https://example.test/announcement" in html
+    assert "net_profit_max" in html
+    assert "change_reason" in html
+    assert audit["verdict"] == "PASS"
+
+    supplemental = json.loads(
+        (run_dir / "supplemental_evidence.json").read_text(encoding="utf-8")
+    )
+    supplemental["items"][0]["source_url"] = None
+    (run_dir / "supplemental_evidence.json").write_text(
+        json.dumps(supplemental),
+        encoding="utf-8",
+    )
+    audit_without_url = build_report(run_dir, datapack)
+    assert audit_without_url["verdict"] == "FAIL"
+    assert any(
+        "Web evidence has no source_url" in issue["message"]
+        for issue in audit_without_url["issues"]
+    )

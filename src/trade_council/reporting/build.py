@@ -219,6 +219,35 @@ def render_markdown(
         f"- T+1 状态：{t_plus_status}",
         "",
     ]
+    data_needs = run.get("data_needs", [])
+    web_supplement = run.get("web_supplement", {})
+    if data_needs or web_supplement:
+        lines.extend(
+            [
+                "## 数据补充",
+                "",
+                f"- 补数状态：{web_supplement.get('status', 'not_run')}",
+            ]
+        )
+        for need in data_needs:
+            lines.append(
+                f"- `{need.get('need_id')}`：{need.get('dataset_id')} / "
+                f"{need.get('field')}（{need.get('priority')}）"
+            )
+        for result in web_supplement.get("results", []):
+            lines.append(
+                f"- 结果 `{result.get('need_id')}`：{result.get('status')}"
+            )
+            if result.get("missing_fields"):
+                lines.append(
+                    "  - 未提取字段："
+                    + "、".join(str(field) for field in result["missing_fields"])
+                )
+            if result.get("error"):
+                lines.append(f"  - 错误：{result['error']}")
+            for source in result.get("sources", []):
+                lines.append(f"  - {source.get('title')}：{source.get('url')}")
+        lines.append("")
     if decision.get("rationale"):
         lines.extend(["## 核心结论", "", str(decision["rationale"]), ""])
     for role_id in ("bull-researcher", "bear-researcher", "risk-manager"):
@@ -329,9 +358,59 @@ def render_html(
         f"<td>{_format_number(item.get('value'), str(item.get('evidence_id')))} "
         f"{html_module.escape(str(item.get('unit', '')))}</td>"
         f"<td>{html_module.escape(str(item.get('available_at', '—')))}</td>"
+        f"<td>{html_module.escape(str(item.get('source_level', 'local')))}</td>"
+        f"<td>{html_module.escape(str(item.get('source_url') or '—'))}</td>"
         "</tr>"
         for item in evidence.get("items", [])
     )
+    supplemental_html = ""
+    data_needs = run.get("data_needs", [])
+    web_supplement = run.get("web_supplement", {})
+    if data_needs or web_supplement:
+        supplement_rows = "".join(
+            f"<li><code>{html_module.escape(str(need.get('need_id')))}</code>: "
+            f"{html_module.escape(str(need.get('dataset_id')))} / "
+            f"{html_module.escape(str(need.get('field')))} "
+            f"<strong>{html_module.escape(str(need.get('priority')))}</strong></li>"
+            for need in data_needs
+        )
+        source_rows = []
+        for result in web_supplement.get("results", []):
+            source_rows.append(
+                f"<li><code>{html_module.escape(str(result.get('need_id')))}</code>: "
+                f"{html_module.escape(str(result.get('status')))}"
+                + (
+                    "；未提取字段："
+                    + html_module.escape(
+                        "、".join(str(field) for field in result["missing_fields"])
+                    )
+                    if result.get("missing_fields")
+                    else ""
+                )
+                + (
+                    "；错误："
+                    + html_module.escape(str(result.get("error")))
+                    if result.get("error")
+                    else ""
+                )
+                + "</li>"
+            )
+            for source in result.get("sources", []):
+                url = str(source.get("url") or "")
+                source_rows.append(
+                    f'<li><a href="{html_module.escape(url)}" rel="noreferrer">'
+                    f'{html_module.escape(str(source.get("title") or url))}</a></li>'
+                    if url
+                    else "<li>无外部来源链接</li>"
+                )
+        supplemental_html = (
+            '<section class="card" data-supplement="true">'
+            "<h2>任务级数据补充</h2>"
+            f"<p>状态：{html_module.escape(str(web_supplement.get('status', 'not_run')))}</p>"
+            f"<ul>{supplement_rows or '<li>无缺口</li>'}</ul>"
+            f"<ul>{''.join(source_rows) or '<li>无外部来源</li>'}</ul>"
+            "</section>"
+        )
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -356,6 +435,7 @@ code{{font-size:11px;overflow-wrap:anywhere}} svg{{max-width:100%;height:auto}} 
 </div></section>
 <section class="card"><h2>已启用分析域</h2>{domain_tags}</section>
 <section class="card"><h2>最终裁决</h2><p>{html_module.escape(str(decision.get('rationale', '')))}</p></section>
+{supplemental_html}
 {trade_context_html}
 <section class="card"><h2>多空辩论</h2>{debate_html or '<p>当前运行未生成辩论产物</p>'}</section>
 {''.join(domain_sections)}
@@ -364,7 +444,7 @@ code{{font-size:11px;overflow-wrap:anywhere}} svg{{max-width:100%;height:auto}} 
 <section class="card" data-domain="risk"><h2>风险视图</h2>{risk_svg}</section>
 <section class="card" data-domain="risk"><h2>风控规则命中</h2><ul>{rule_html}</ul></section>
 <section class="card"><h2>数据缺口</h2><ul>{gap_html}</ul></section>
-<section class="card"><h2>证据索引</h2><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>可用时间</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
+<section class="card"><h2>证据索引</h2><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>可用时间</th><th>来源层级</th><th>来源链接</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
 <p class="muted">本报告仅供研究参考，不构成投资建议。</p>
 </main></body></html>"""
     return document, price_points, refs
@@ -374,6 +454,10 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     decision = json.loads((run_dir / "decision.json").read_text(encoding="utf-8"))
     evidence = json.loads((datapack_dir / "evidence.json").read_text(encoding="utf-8"))
+    supplemental_path = run_dir / "supplemental_evidence.json"
+    if supplemental_path.is_file():
+        supplemental = json.loads(supplemental_path.read_text(encoding="utf-8"))
+        evidence["items"].extend(supplemental.get("items", []))
     roles = _read_roles(run_dir)
     enabled_domains = _enabled_domains(roles)
     risk_policy_path = run_dir.parent.parent / "configs" / "risk.yaml"
@@ -409,6 +493,7 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
         trade_context=trade_context,
         market_rules_path=market_rules_path,
         asof=str(run.get("asof", "")),
+        evidence_items=evidence.get("items", []),
     )
     (run_dir / "report.md").write_text(markdown, encoding="utf-8")
     (run_dir / "report.html").write_text(document, encoding="utf-8")

@@ -122,6 +122,18 @@ class FakeWebSearchProvider:
         stock_name: str,
         asof: str,
     ) -> list[WebSearchResult]:
+        fields = (
+            {
+                "ann_date": "2026-10-16",
+                "type": "预增",
+                "net_profit_min": 1.0,
+                "net_profit_max": 2.0,
+                "summary": "外部补充摘要",
+                "change_reason": "外部信息",
+            }
+            if need.dataset_id == "reports.forecast"
+            else {"pe_ttm": 20.0, "pb": 8.0, "ps_ttm": 6.0}
+        )
         return [
             WebSearchResult(
                 title="外部补充事实",
@@ -129,7 +141,7 @@ class FakeWebSearchProvider:
                 published_at="2026-10-16",
                 available_at="2026-10-16 20:00:00",
                 summary="外部补充摘要",
-                fields={"net_profit_min": 1.0},
+                fields=fields,
                 confidence="high",
             )
         ]

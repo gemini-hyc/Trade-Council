@@ -98,6 +98,8 @@ def test_run_listing_and_export_filename(tmp_path: Path) -> None:
     summaries = list_runs(runs_root)
     assert [item["run_id"] for item in summaries] == ["newer", "older"]
     assert run_summary(second)["audit_verdict"] == "PASS"
+    assert run_summary(second)["web_supplement_status"] is None
+    assert run_summary(second)["data_need_count"] == 0
 
     target = export_report(tmp_path, "newer")
     assert target.name == "贵州茅台-20261021.html"

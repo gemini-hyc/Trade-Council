@@ -40,8 +40,8 @@ uv run trade-council analyze 600519.SH \
   --mode full --profile deep --allow-cloud
 ```
 
-任务级外部数据补充只在显式传入 `--allow-web`，并且配置了
-`web_supplement_endpoint` 时启用：
+任务级外部数据补充只在显式传入 `--allow-web` 时启用；使用 `cninfo` provider
+无需额外配置 endpoint：
 
 ```bash
 uv run trade-council analyze 600519.SH \

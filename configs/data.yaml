@@ -5,7 +5,7 @@ asof_timezone: "Asia/Shanghai"
 default_cutoff: "23:59:59"
 news_default_enabled: false
 quant_db_enabled: false
-web_supplement_enabled: false
+web_supplement_provider: cninfo
 web_supplement_endpoint: null
 web_supplement_api_key_env: TRADE_COUNCIL_WEB_SEARCH_KEY
 web_supplement_timeout_seconds: 20
