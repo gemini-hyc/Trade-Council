@@ -104,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--deep-tier", choices=["auto", "flash", "pro"], default=None)
     analyze_parser.add_argument("--include-news", action="store_true")
     analyze_parser.add_argument("--allow-cloud", action="store_true")
+    analyze_parser.add_argument("--allow-web", action="store_true")
     analyze_parser.add_argument("--years", type=int, default=8)
     analyze_parser.add_argument("--datapack", default=None)
     analyze_parser.add_argument("--run-id", default=None)
@@ -351,6 +352,7 @@ def _analyze(args: argparse.Namespace) -> int:
         include_news=args.include_news,
         trade_context=trade_context,
         run_kind=args.run_kind,
+        web_search=args.allow_web,
         resume=args.resume,
     )
     state = asyncio.run(engine.run())

@@ -24,6 +24,10 @@ class EvidenceItem(StrictModel):
     snapshot_id: str
     source_hash: str | None = None
     note: str = ""
+    source_level: str = "local"
+    source_url: str | None = None
+    retrieved_at: str | None = None
+    extraction_confidence: str | None = None
 
 
 class EvidenceIndex:
@@ -59,6 +63,10 @@ class EvidenceIndex:
         formula: str | None = None,
         source_hash: str | None = None,
         note: str = "",
+        source_level: str = "local",
+        source_url: str | None = None,
+        retrieved_at: str | None = None,
+        extraction_confidence: str | None = None,
     ) -> EvidenceItem:
         payload = {
             "dataset_id": dataset_id,
@@ -71,6 +79,10 @@ class EvidenceIndex:
             "unit": unit,
             "formula": formula,
             "snapshot_id": self.snapshot_id,
+            "source_level": source_level,
+            "source_url": source_url,
+            "retrieved_at": retrieved_at,
+            "extraction_confidence": extraction_confidence,
         }
         slug = dataset_id.replace(".", "-").replace("_", "-")
         evidence_id = f"F-{slug}-{self._digest(payload)}"
@@ -88,6 +100,10 @@ class EvidenceIndex:
             snapshot_id=self.snapshot_id,
             source_hash=source_hash,
             note=note,
+            source_level=source_level,
+            source_url=source_url,
+            retrieved_at=retrieved_at,
+            extraction_confidence=extraction_confidence,
         )
         self._items[evidence_id] = item
         return item
@@ -99,6 +115,9 @@ class EvidenceIndex:
 
     def all(self) -> list[EvidenceItem]:
         return list(self._items.values())
+
+    def add_item(self, item: EvidenceItem) -> None:
+        self._items[item.evidence_id] = item
 
     def to_dict(self) -> dict[str, Any]:
         return {

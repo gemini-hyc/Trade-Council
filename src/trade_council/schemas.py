@@ -30,6 +30,10 @@ class DataConfig(StrictModel):
     default_cutoff: str = "23:59:59"
     news_default_enabled: bool = False
     quant_db_enabled: bool = False
+    web_supplement_enabled: bool = False
+    web_supplement_endpoint: str | None = None
+    web_supplement_api_key_env: str = "TRADE_COUNCIL_WEB_SEARCH_KEY"
+    web_supplement_timeout_seconds: float = 20.0
 
 
 class LeadConfig(StrictModel):

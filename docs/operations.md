@@ -40,6 +40,24 @@ uv run trade-council analyze 600519.SH \
   --mode full --profile deep --allow-cloud
 ```
 
+任务级外部数据补充只在显式传入 `--allow-web`，并且配置了
+`web_supplement_endpoint` 时启用：
+
+```bash
+uv run trade-council analyze 600519.SH \
+  --mode full --profile deep --allow-cloud --allow-web
+```
+
+外部补充默认只写入本次 run：
+
+```text
+runs/<run_id>/data_needs.json
+runs/<run_id>/supplemental_data.json
+runs/<run_id>/supplemental_evidence.json
+```
+
+它不会自动修改 `~/quant-data`。数据库回填必须单独执行并重新校验。
+
 不要将 `.env`、API Key、持仓文件或 `runs/` 提交到 Git。
 
 ## 3. 构建数据包

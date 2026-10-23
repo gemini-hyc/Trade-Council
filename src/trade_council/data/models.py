@@ -33,6 +33,11 @@ class DatasetSpec(StrictModel):
     label: str
     path: str
     file_glob: str | None = None
+    partition: str | None = None
+    primary_key: list[str] = Field(default_factory=list)
+    source_level: str = "local"
+    owner: str | None = None
+    schema_version: str = "1.0.0"
     time_field: str
     available_at_field: str
     alternate_available_at_field: str | None = None
@@ -49,6 +54,7 @@ class DatasetSpec(StrictModel):
     field_availability: list[FieldAvailability] = Field(default_factory=list)
     semantic_fields: list[SemanticFieldAvailability] = Field(default_factory=list)
     verification_status: str = "verified"
+    quality_checks: list[str] = Field(default_factory=list)
 
 
 class DatasetRegistryConfig(StrictModel):

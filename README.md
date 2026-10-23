@@ -85,6 +85,7 @@ uv run trade-council models probe --profile batch --role market-analyst --json
 uv run trade-council analyze 600519.SH --mode quick --profile batch
 uv run trade-council analyze 600519.SH --mode full --profile batch
 uv run trade-council analyze 600519.SH --mode full --profile deep --allow-cloud
+uv run trade-council analyze 600519.SH --mode full --profile deep --allow-cloud --allow-web
 uv run trade-council analyze 600519.SH --mode full --profile deep --allow-cloud \
   --capital 100000 --position-state flat --board main
 uv run trade-council analyze 600519.SH --mode full --profile deep --allow-cloud \
@@ -123,3 +124,4 @@ runs/         本地运行产物（不进入 Git）
 
 扩展方法说明见 `docs/method-packages.md`。
 日常操作见 `docs/operations.md`，Prompt 修改见 `docs/prompt-guide.md`。
+数据事件、任务级补数和质量门禁见 `docs/data-layer.md`。

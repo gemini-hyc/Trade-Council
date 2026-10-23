@@ -185,6 +185,9 @@ def _make_quant_root(tmp_path: Path) -> Path:
 
 def test_registry_encodes_publish_lag_and_northbound_windows() -> None:
     registry = DatasetRegistry.load(ROOT / "configs" / "datasets.yaml")
+    assert registry.get("announcements.cninfo").partition == "daily"
+    assert registry.get("news.em_fast").time_field == "show_time"
+    assert registry.get("industry.sw_official").enabled is False
     margin = registry.get("sentiment.margin_detail")
     assert margin.publish_lag_days == 1
     assert registry.field_available(

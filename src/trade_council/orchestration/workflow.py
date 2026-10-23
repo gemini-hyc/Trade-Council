@@ -14,13 +14,14 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from ..config import ProjectConfig
+from ..data.supplement import DataNeed, WebSearchProvider, detect_data_needs, supplement_data_needs
 from ..decision.risk_rules import (
     TradeContext,
     enrich_decision_with_trade_context,
     load_risk_policy,
     validate_decision,
 )
-from ..engineering.evidence import EvidenceIndex
+from ..engineering.evidence import EvidenceIndex, EvidenceItem
 from ..errors import InvalidResponseError
 from ..extensions.loader import load_resolved_methods
 from ..extensions.runtime import build_role_method_context, execute_method
@@ -72,6 +73,8 @@ class WorkflowEngine:
         include_news: bool,
         trade_context: TradeContext | None = None,
         run_kind: str = "normal",
+        web_search: bool = False,
+        web_search_provider: WebSearchProvider | None = None,
         resume: bool = False,
         providers: dict[str, Any] | None = None,
     ) -> None:
@@ -84,6 +87,8 @@ class WorkflowEngine:
         self.include_news = include_news
         self.trade_context = trade_context or TradeContext()
         self.run_kind = run_kind
+        self.web_search = web_search
+        self.web_search_provider = web_search_provider
         self.resume = resume
         self.prompts = PromptRegistry(config.root / "prompts")
         self.client = LLMClient(
@@ -93,11 +98,20 @@ class WorkflowEngine:
         )
         self.methods = load_resolved_methods(config)
         self.evidence = EvidenceIndex.load(self.data_pack_dir / "evidence.json")
+        supplemental_evidence_path = self.store.run_dir / "supplemental_evidence.json"
+        if supplemental_evidence_path.is_file():
+            supplemental = json.loads(
+                supplemental_evidence_path.read_text(encoding="utf-8")
+            )
+            for item in supplemental.get("items", []):
+                self.evidence.add_item(EvidenceItem.model_validate(item))
         self.digest = (self.data_pack_dir / "DATA_DIGEST.md").read_text(encoding="utf-8")
         self.manifest = json.loads(
             (self.data_pack_dir / "manifest.json").read_text(encoding="utf-8")
         )
         self.roles = {role.id: role for role in config.team.roles}
+        self.data_needs: list[DataNeed] = []
+        self.web_supplement_status = "not_run"
         self.prompt_hashes = {
             role.id: self.prompts.load(role.id).sha256
             for role in config.team.roles
@@ -246,6 +260,9 @@ class WorkflowEngine:
             for item in self.method_executions.values()
         ]
         state["degraded"] = state["degraded"] or self._has_method_gaps()
+
+        if self.mode == "full":
+            await self._supplement_missing_data(state)
 
         if self.mode == "quick":
             screening = make_screening_result(self.evidence)
@@ -550,6 +567,8 @@ class WorkflowEngine:
             "trade_context": asdict(self.trade_context),
             "position_size_allowed": self.trade_context.position_size_allowed,
             "trade_instructions_allowed": self.allow_trade_instructions,
+            "data_needs": [item.model_dump() for item in self.data_needs],
+            "web_supplement_status": self.web_supplement_status,
             "data_digest": self.digest,
             "evidence": [item.model_dump() for item in self.evidence.all()],
             "method_context": method_context,
@@ -645,6 +664,31 @@ class WorkflowEngine:
         )
         _ = result
         return validated.model_dump()
+
+    async def _supplement_missing_data(self, state: dict[str, Any]) -> None:
+        needs = detect_data_needs(self.manifest, include_news=self.include_news)
+        self.data_needs = needs
+        provider = self.web_search_provider if self.web_search else None
+        payload = await supplement_data_needs(
+            needs=needs,
+            provider=provider,
+            data_config=self.config.data,
+            evidence=self.evidence,
+            asof=str(self.manifest.get("asof", "")),
+            symbol=str(self.manifest.get("ts_code", "")),
+            stock_name=str(self.manifest.get("stock_name") or self.manifest.get("ts_code", "")),
+            run_dir=self.store.run_dir,
+        )
+        self.web_supplement_status = str(payload.get("status", "unknown"))
+        state["data_needs"] = [item.model_dump() for item in needs]
+        state["web_supplement"] = payload
+        self.capability_flags["web_supplement"] = self.web_supplement_status in {
+            "not_needed",
+            "completed",
+        }
+        if needs and not self.capability_flags["web_supplement"]:
+            state["degraded"] = True
+        self.store.save_state(state)
 
     def _normalize_decision(self, schema: type[T], value: T) -> T:
         if not isinstance(value, (TradeProposal, FinalDecision)):

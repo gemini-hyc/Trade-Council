@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 import pytest
 
 from trade_council.config import load_project_config
+from trade_council.data.supplement import DataNeed, WebSearchResult
 from trade_council.decision.risk_rules import TradeContext
 from trade_council.errors import InvalidResponseError, ProviderUnavailableError
 from trade_council.llm.base import (
@@ -112,6 +113,28 @@ class Phase2FailingProvider(FakeWorkflowProvider):
         return await super().complete(request)
 
 
+class FakeWebSearchProvider:
+    async def search(
+        self,
+        need: DataNeed,
+        *,
+        symbol: str,
+        stock_name: str,
+        asof: str,
+    ) -> list[WebSearchResult]:
+        return [
+            WebSearchResult(
+                title="外部补充事实",
+                url="https://example.test/source",
+                published_at="2026-10-16",
+                available_at="2026-10-16 20:00:00",
+                summary="外部补充摘要",
+                fields={"net_profit_min": 1.0},
+                confidence="high",
+            )
+        ]
+
+
 def _make_datapack(tmp_path: Path) -> Path:
     datapack = tmp_path / "pack"
     datapack.mkdir()
@@ -157,6 +180,7 @@ def test_full_workflow_and_resume(tmp_path: Path) -> None:
         "news": False,
         "position_size": False,
         "trade_instructions": False,
+        "web_supplement": True,
     }
     assert state["completed_phases"] == ["phase1", "phase2", "phase3", "phase4"]
     assert state["trade_context"]["board"] == "main"
@@ -224,6 +248,42 @@ def test_quick_mode_is_deterministic(tmp_path: Path) -> None:
     assert state["status"] == "COMPLETED_NO_DECISION"
     assert state["screening_result"]["direction_bias"] == "insufficient"
     assert fake.calls == 0
+
+
+def test_workflow_collects_task_scoped_web_evidence(tmp_path: Path) -> None:
+    config = load_project_config(ROOT)
+    datapack = _make_datapack(tmp_path)
+    manifest = json.loads(
+        (datapack / "manifest.json").read_text(encoding="utf-8")
+    )
+    manifest["datasets"] = [
+        {"key": "forecast_single", "status": "WARN"},
+        {"key": "daily_basic_quality", "status": "ERROR"},
+    ]
+    (datapack / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    engine = WorkflowEngine(
+        config,
+        data_pack_dir=datapack,
+        run_dir=tmp_path / "web-run",
+        profile="batch",
+        mode="full",
+        deep_tier=None,
+        include_news=False,
+        web_search=True,
+        web_search_provider=FakeWebSearchProvider(),
+        providers={"ollama": FakeWorkflowProvider(), "deepseek": FakeWorkflowProvider()},
+    )
+    state: dict[str, Any] = {}
+    asyncio.run(engine._supplement_missing_data(state))
+    assert len(state["data_needs"]) == 2
+    assert state["web_supplement"]["status"] == "completed"
+    assert (tmp_path / "web-run" / "supplemental_evidence.json").is_file()
+    assert any(
+        item.source_level == "web" for item in engine.evidence.all()
+    )
 
 
 def test_failed_phase_is_recorded_and_resume_continues(tmp_path: Path) -> None:

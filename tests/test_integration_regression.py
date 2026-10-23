@@ -231,6 +231,19 @@ def test_missing_adjustment_factor_is_explicitly_degraded(tmp_path: Path) -> Non
     assert adj["status"] == "ERROR"
 
 
+def test_all_null_valuation_columns_are_flagged(tmp_path: Path) -> None:
+    root = _make_quant_root(tmp_path)
+    path = root / "daily_basic" / "2026-10-16.parquet"
+    frame = pd.read_parquet(path)
+    frame[["pe_ttm", "pb", "ps_ttm"]] = np.nan
+    frame.to_parquet(path, index=False)
+    manifest = build("600519.SH", "2026-10-16", tmp_path / "pack", 1, data_root=root)
+    quality = next(
+        item for item in manifest["datasets"] if item["key"] == "daily_basic_quality"
+    )
+    assert quality["status"] == "ERROR"
+
+
 class _WorkflowFake:
     name = "fake"
     model_specs: ClassVar[dict[str, Any]] = {}

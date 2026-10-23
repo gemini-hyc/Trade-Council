@@ -185,7 +185,10 @@ datasets:
     publish_lag_days: 0
     required: false
     enabled: true
-    fields: [ts_code, ann_date, end_date, type, net_profit_min, net_profit_max]
+    fields:
+      [ts_code, ann_date, end_date, type, p_change_min, p_change_max,
+       net_profit_min, net_profit_max, last_parent_net, first_ann_date,
+       summary, change_reason, update_flag]
     known_traps: ["个股价时效与数据集时效必须分开检查"]
 
   - id: reports.express
@@ -196,7 +199,10 @@ datasets:
     publish_lag_days: 0
     required: false
     enabled: true
-    fields: [ts_code, ann_date, end_date]
+    fields:
+      [ts_code, ann_date, end_date, revenue, operate_profit, total_profit,
+       n_income, total_assets, total_hldr_eqy_exc_min_int, diluted_eps,
+       diluted_roe, yoy_net_profit, bps, perf_summary, update_flag]
 
   - id: market.announcement
     label: 公司公告
@@ -219,6 +225,191 @@ datasets:
     required: false
     enabled: false
     known_traps: ["数据停更", "无权限补充", "默认关闭"]
+
+  - id: announcements.cninfo
+    label: 巨潮公告事件
+    path: announcements/cninfo
+    partition: daily
+    primary_key: [ann_id]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: date
+    available_at_field: date
+    publish_time_local: "21:30:00"
+    timezone: Asia/Shanghai
+    required: false
+    enabled: true
+    fields:
+      [date, trade_date, sec_code, sec_name, title, ann_time, ann_type,
+       board, event_tag, event_conf, event_all, adjunct_url, full_url,
+       adjunct_kb, ann_id, org_id, ann_type_code, doc_role]
+    known_traps:
+      - "ann_time 多数为日期零点，不能当作精确盘中时间"
+      - "同一事件可能由 issuers/intermediary 重复披露"
+      - "下游事件计数必须按 date + sec_code + event_tag 去重"
+    quality_checks: [unique_key_ann_id, event_tag_ratio, issuer_role]
+
+  - id: news.em_fast
+    label: 东财市场快讯
+    path: news/em_fast
+    partition: daily
+    primary_key: [code]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: show_time
+    available_at_field: show_time
+    publish_time_local: "21:30:00"
+    timezone: Asia/Shanghai
+    required: false
+    enabled: true
+    fields:
+      [date, trade_date, code, show_time, title, summary, stock_list,
+       a_codes, title_color, real_sort, share, comment_n]
+    known_traps:
+      - "a_codes 需要拆分为多个 ts_code"
+      - "无 A 股关联的快讯进入宏观事件流"
+    quality_checks: [unique_key_code, a_code_parse_ratio]
+
+  - id: reports.broker_recommend
+    label: 券商月度金股
+    path: reports/broker_recommend
+    partition: monthly
+    primary_key: [month, broker, ts_code]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: month
+    available_at_field: month
+    enabled: false
+    fields: [month, broker, ts_code, name]
+    known_traps: ["只表示券商关注，不等同于一致预期或目标价"]
+
+  - id: reports.dividend
+    label: 分红送配
+    path: reports/dividend
+    partition: quarterly
+    primary_key: [ts_code, end_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: end_date
+    available_at_field: ann_date
+    enabled: false
+    fields: [ts_code, ann_date, end_date]
+
+  - id: reports.repurchase
+    label: 股份回购
+    path: reports/repurchase
+    partition: quarterly
+    primary_key: [ts_code, end_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: end_date
+    available_at_field: ann_date
+    enabled: false
+    fields: [ts_code, ann_date, end_date]
+
+  - id: reports.stk_managers
+    label: 高管持股
+    path: reports/stk_managers
+    partition: quarterly
+    primary_key: [ts_code, end_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: end_date
+    available_at_field: ann_date
+    enabled: false
+    fields: [ts_code, ann_date, end_date]
+
+  - id: reports.top10_floatholders
+    label: 十大流通股东
+    path: reports/top10_floatholders
+    partition: quarterly
+    primary_key: [ts_code, end_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: end_date
+    available_at_field: ann_date
+    enabled: false
+    fields: [ts_code, ann_date, end_date]
+
+  - id: reports.report_rc
+    label: 券商研报一致预期（按需）
+    path: reports/report_rc
+    partition: ondemand
+    primary_key: []
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: report_date
+    available_at_field: report_date
+    enabled: false
+    fields: []
+    known_traps: ["按需拉取；残缺数据不得冒充完整一致预期"]
+
+  - id: industry.sw_official
+    label: 申万官方行业点位
+    path: industry/sw_official
+    partition: daily
+    primary_key: [code, trade_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: date
+    available_at_field: date
+    enabled: false
+    fields: [date, trade_date, code, open, high, low, close, vol, amount]
+
+  - id: industry.sw_valuation
+    label: 申万行业估值
+    path: industry/sw_official/sw_valuation_daily.parquet
+    partition: daily
+    primary_key: [sw_code, trade_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: date
+    available_at_field: date
+    enabled: false
+    fields:
+      [date, trade_date, sw_code, sw_name, close, pct_chg, turnover,
+       pe, pb, avg_price, amount_share, vol, float_mv, avg_float_mv,
+       dv_ttm, level]
+
+  - id: futures.daily
+    label: 期货日行情
+    path: futures/fut_daily
+    partition: daily
+    primary_key: [ts_code, trade_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: trade_date
+    available_at_field: trade_date
+    enabled: false
+    fields: []
+    known_traps: ["区分真实月份合约和连续/品种指数；涨跌基准是昨结算价"]
+
+  - id: futures.index_basis
+    label: 股指期货基差
+    path: futures/index_basis_daily.parquet
+    partition: daily
+    primary_key: [ts_code, trade_date]
+    source_level: local
+    owner: stock-doctor
+    schema_version: "1.0.0"
+    time_field: date
+    available_at_field: date
+    enabled: false
+    fields:
+      [date, trade_date, prod, ts_code, close, settle, vol, amount, oi,
+       oi_chg, multiplier, spot_index, spot_close, basis, basis_pct,
+       days_to_expiry, ann_basis_pct, is_main]
 
   - id: market.stk_limit
     label: 涨跌停价格

@@ -37,6 +37,7 @@ import pyarrow.dataset as pads
 from ..data.local_quant import LocalQuantProvider
 from ..data.registry import DatasetRegistry
 from .evidence import EvidenceIndex
+from .events import append_event_digest, load_events, write_event_artifacts
 from .indicators import add_indicators, main_net_amount
 
 BASE = Path(os.environ.get("QUANT_DATA", "~/quant-data")).expanduser()
@@ -337,6 +338,33 @@ def build(
         db = db[db["trade_date"] <= asof.replace("-", "")].sort_values("trade_date")
         db.to_csv(out_dir / "daily_basic.csv", index=False, encoding="utf-8")
         REG.get("daily_basic")["span"] = f'{db["trade_date"].iloc[0]} ~ {db["trade_date"].iloc[-1]}'
+        last_db = db.iloc[-1]
+        valuation_fields = ["pe_ttm", "pb", "ps_ttm"]
+        empty_valuation = [
+            field
+            for field in valuation_fields
+            if field in last_db and pd.isna(last_db.get(field))
+        ]
+        if len(empty_valuation) == len(valuation_fields):
+            REG.add(
+                "daily_basic_quality",
+                "估值字段完整性",
+                "ERROR",
+                len(db),
+                str(last_db.get("trade_date", "")),
+                f"最新交易日估值字段整列为空：{', '.join(empty_valuation)}",
+                BASE / "daily_basic",
+            )
+        else:
+            REG.add(
+                "daily_basic_quality",
+                "估值字段完整性",
+                "OK",
+                len(db),
+                str(last_db.get("trade_date", "")),
+                f"缺失字段：{', '.join(empty_valuation) or '无'}",
+                BASE / "daily_basic",
+            )
 
     # ---------- 4. 资金流 ----------
     mf = scan(BASE / "moneyflow",
@@ -584,6 +612,56 @@ def build(
             REG.get("express")["status"] = "NO_RECORD"
             REG.get("express")["note"] = f"无 ann_date<={asof} 的记录"
 
+    # ---------- 7.1 事件时间线：公告 / 快讯 / 业绩预告 ----------
+    event_payload = load_events(
+        BASE,
+        code6=code6,
+        ts_code=ts_code,
+        asof=asof,
+        include_news=include_news,
+    )
+    announcement_count = len(event_payload["announcements"])
+    news_count = len(event_payload["news"])
+    event_count = len(event_payload["events"])
+    REG.add(
+        "announcements_cninfo",
+        "巨潮公告事件",
+        "OK" if announcement_count else "NO_RECORD",
+        announcement_count,
+        "",
+        "issuer 事件参与时间线；intermediary 文档保留在原始公告中",
+        BASE / "announcements" / "cninfo",
+    )
+    if include_news:
+        REG.add(
+            "news_em_fast",
+            "东财市场快讯",
+            "OK" if news_count else "NO_RECORD",
+            news_count,
+            "",
+            "a_codes 已按个股解析",
+            BASE / "news" / "em_fast",
+        )
+    else:
+        REG.add(
+            "news_em_fast",
+            "东财市场快讯",
+            "DISABLED",
+            0,
+            "",
+            "新闻默认关闭；仅 --include-news 时启用",
+            BASE / "news" / "em_fast",
+        )
+    REG.add(
+        "event_timeline",
+        "标准化事件时间线",
+        "OK" if event_count else "NO_RECORD",
+        event_count,
+        "",
+        "公告、快讯和业绩预告统一事件视图",
+        "",
+    )
+
     # ---------- 8. 行业定位 ----------
     ind_info = None
     try:
@@ -814,6 +892,10 @@ def build(
         ),
         encoding="utf-8",
     )
+    for event in event_payload["events"]:
+        event["snapshot_id"] = snapshot_id
+    write_event_artifacts(out_dir, event_payload)
+    append_event_digest(out_dir, event_payload)
 
     evidence = EvidenceIndex(snapshot_id)
     price_date = str(last["date"].date())
@@ -984,6 +1066,25 @@ def build(
                     source_hash=snapshot_id,
                 )
 
+    for event in event_payload["events"]:
+        event["snapshot_id"] = snapshot_id
+        evidence.add(
+            dataset_id=event["source_dataset"],
+            path=event["source_dataset"].replace(".", "/"),
+            primary_key=ts_code,
+            event_date=str(event["event_date"]),
+            available_at=str(event["available_at"]),
+            field="event",
+            value=event["title"],
+            unit="",
+            formula=f"event_type={event['event_type']}",
+            source_hash=snapshot_id,
+            note=f"{event['event_id']} {event['summary'][:160]}",
+            source_level=str(event["source_level"]),
+            source_url=event["source_url"],
+            extraction_confidence=str(event["confidence"]),
+        )
+
     evidence.write(out_dir)
     evidence.append_digest(out_dir / "DATA_DIGEST.md")
 
@@ -995,6 +1096,11 @@ def build(
         evidence_file="evidence.json",
         evidence_trace_file="evidence_trace.jsonl",
         evidence_count=len(evidence.all()),
+        event_count=len(event_payload["events"]),
+        announcement_count=len(event_payload["announcements"]),
+        news_count=len(event_payload["news"]),
+        events_file="events.csv",
+        event_timeline_file="event_timeline.json",
         data_contract=str(DATA_CONTRACT_PATH),
         registry_version=registry.config.version,
         provider="local_quant",

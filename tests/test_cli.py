@@ -37,6 +37,7 @@ def test_analyze_accepts_trade_context_flags() -> None:
             "2026-10-20",
             "--board",
             "main",
+            "--allow-web",
         ]
     )
     assert args.capital == 100_000
@@ -44,6 +45,7 @@ def test_analyze_accepts_trade_context_flags() -> None:
     assert args.position_shares == 500
     assert args.position_opened_date == "2026-10-20"
     assert args.board == "main"
+    assert args.allow_web is True
 
 
 def test_operations_commands_are_available() -> None:
