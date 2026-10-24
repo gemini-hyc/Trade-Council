@@ -29,6 +29,7 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -52,7 +53,7 @@ class Registry:
     """数据集完备性登记表 —— 报告里每一句「数据缺口」都必须能在这里找到依据。"""
 
     def __init__(self):
-        self.items: list[dict] = []
+        self.items: list[dict[str, Any]] = []
 
     def add(self, key, label, status, rows=0, span="", note="", path=""):
         self.items.append(
@@ -108,7 +109,7 @@ def trade_dates() -> list[str]:
     return PROVIDER.trade_dates()
 
 
-def scan(dirpath: Path, columns: list[str] | None, match: tuple | None, label: str, key: str,
+def scan(dirpath: Path, columns: list[str] | None, match: tuple[str, str] | None, label: str, key: str,
          since: int | None = None):
     """扫描目录并按等值条件取行。
 
@@ -227,7 +228,12 @@ def _filter_asof(
     return result
 
 
-def _snapshot_id(code6: str, asof: str, source_fingerprints: list[dict], datasets: list[dict]) -> str:
+def _snapshot_id(
+    code6: str,
+    asof: str,
+    source_fingerprints: list[dict[str, Any]],
+    datasets: list[dict[str, Any]],
+) -> str:
     h = hashlib.sha256()
     h.update(code6.encode())
     h.update(asof.encode())
@@ -456,7 +462,7 @@ def build(
                "depr_fa_coga_dpba", "amort_intang_assets", "c_pay_acq_const_fiolta",
                "n_incr_cash_cash_equ"]
 
-    fin = {}
+    fin: dict[str, Any] = {}
     for kind, cols, label in (("income", INC_COLS, "利润表"),
                               ("balancesheet", BAL_COLS, "资产负债表"),
                               ("cashflow", CF_COLS, "现金流量表")):
@@ -1149,7 +1155,7 @@ def pct(v, nd=2):
 
 def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
                  ind_info, fresh_gap, af_flag, fc_gap=None, db=None, include_news=False):
-    L = []
+    L: list[str] = []
     A = L.append
     A(f"# 数据摘要 · {stock_name}（{ts_code}）")
     A("")
@@ -1463,9 +1469,9 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
         m = pd.read_csv(mfp)
         m["trade_date"] = m["trade_date"].astype(str)
         num = ["buy_elg_amount", "sell_elg_amount", "buy_lg_amount", "sell_lg_amount"]
-        if all(c in m.columns for c in num):
-            for c in num:
-                m[c] = pd.to_numeric(m[c], errors="coerce").fillna(0)
+        if all(col in m.columns for col in num):
+            for col in num:
+                m[col] = pd.to_numeric(m[col], errors="coerce").fillna(0)
             # Tushare moneyflow 的 amount 字段单位为万元
             m["elg_net"] = m["buy_elg_amount"] - m["sell_elg_amount"]
             m["lg_net"] = m["buy_lg_amount"] - m["sell_lg_amount"]
@@ -1536,8 +1542,8 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
         "决策一致性：方向（BUY/SELL/HOLD）、仓位、入场区间、止损、目标价五者互不矛盾？",
         "图表信息量：每条参考线、每根柱子是否承载数据？出现空数组或 2-3 个点的「凑数图」即视为不合格。",
     ]
-    for i, c in enumerate(checklist, 1):
-        A(f"{i}. [ ] {c}")
+    for i, item in enumerate(checklist, 1):
+        A(f"{i}. [ ] {item}")
     A("")
 
     (out_dir / "DATA_DIGEST.md").write_text("\n".join(L), encoding="utf-8")
