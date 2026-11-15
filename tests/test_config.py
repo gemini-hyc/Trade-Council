@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_project_config_loads() -> None:
     config = load_project_config(ROOT)
     assert config.app.name == "Trade-Council"
-    assert config.app.default_profile == "batch"
+    assert config.app.default_profile == "deep"
+    assert config.app.analysis_backend == "current_agent"
+    assert config.app.batch_research_enabled is False
     assert config.data.news_default_enabled is False
     assert config.data.quant_db_enabled is False
     assert set(config.models.profiles) == {"batch", "deep"}

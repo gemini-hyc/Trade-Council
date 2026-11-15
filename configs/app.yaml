@@ -2,6 +2,8 @@ name: Trade-Council
 version: 0.1.0
 run_dir: runs
 default_mode: full
-default_profile: batch
+default_profile: deep
+analysis_backend: current_agent
+batch_research_enabled: false
 log_level: INFO
 

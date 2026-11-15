@@ -18,7 +18,9 @@ class AppConfig(StrictModel):
     version: str
     run_dir: str = "runs"
     default_mode: Literal["full", "quick", "data"] = "full"
-    default_profile: Literal["batch", "deep"] = "batch"
+    default_profile: Literal["batch", "deep"] = "deep"
+    analysis_backend: Literal["current_agent", "api"] = "current_agent"
+    batch_research_enabled: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 

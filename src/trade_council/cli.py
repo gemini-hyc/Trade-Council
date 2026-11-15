@@ -30,6 +30,7 @@ from .operations.runs import (
     run_summary,
     summarize_calls,
 )
+from .orchestration.current_agent import prepare_current_agent_task
 from .orchestration.workflow import WorkflowEngine
 from .reporting.build import build_report
 
@@ -99,7 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser = subparsers.add_parser("analyze", help="Run the multi-role workflow.")
     analyze_parser.add_argument("code")
     analyze_parser.add_argument("--asof", default=None)
-    analyze_parser.add_argument("--profile", choices=["batch", "deep"], default="batch")
+    analyze_parser.add_argument("--profile", choices=["batch", "deep"], default=None)
     analyze_parser.add_argument("--mode", choices=["full", "quick", "data"], default="full")
     analyze_parser.add_argument("--deep-tier", choices=["auto", "flash", "pro"], default=None)
     analyze_parser.add_argument("--include-news", action="store_true")
@@ -212,6 +213,11 @@ def _data(args: argparse.Namespace) -> int:
 
 def _models_list(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
+    if config.app.analysis_backend == "current_agent":
+        print("backend=current_agent model=current_session; no external model API")
+        print(f"batch_research_enabled={config.app.batch_research_enabled}")
+        print("API profiles in models.yaml are legacy configuration, inactive for current-agent analysis.")
+        return 0
     for name, profile in config.models.profiles.items():
         print(f"[{name}] {profile.display_name} provider={profile.provider}")
         for category, model in profile.models.items():
@@ -223,6 +229,9 @@ def _models_list(args: argparse.Namespace) -> int:
 
 def _models_check(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
+    if config.app.analysis_backend == "current_agent":
+        print("current_agent\tOK\tUses the current chat agent; no API key or provider probe required.")
+        return 0
     failures = 0
     for name, provider_config in config.models.providers.items():
         provider = build_provider(name, provider_config)
@@ -235,6 +244,17 @@ def _models_check(args: argparse.Namespace) -> int:
 
 def _models_route(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
+    if config.app.analysis_backend == "current_agent":
+        if args.profile == "batch" and not config.app.batch_research_enabled:
+            print("error: batch research is paused", file=sys.stderr)
+            return 2
+        if args.role not in {role.id for role in config.team.roles}:
+            print(f"error: unknown role: {args.role}", file=sys.stderr)
+            return 2
+        print(json.dumps({"profile": args.profile, "role": args.role,
+                          "backend": "current_agent", "model": "current_session",
+                          "external_api": False}, ensure_ascii=False, indent=2))
+        return 0
     client = LLMClient(config.models)
     decision = client.route(
         role=args.role,
@@ -247,6 +267,12 @@ def _models_route(args: argparse.Namespace) -> int:
 
 def _models_probe(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
+    if config.app.analysis_backend == "current_agent":
+        print("error: current-agent mode has no API probe; analysis runs in the current chat", file=sys.stderr)
+        return 2
+    if args.profile == "batch" and not config.app.batch_research_enabled:
+        print("error: batch research is paused", file=sys.stderr)
+        return 2
     provider_name = config.models.profiles[args.profile].provider
     provider_kind = config.models.providers[provider_name].kind
     if provider_kind != "ollama" and not args.allow_cloud:
@@ -296,11 +322,19 @@ def _models_probe(args: argparse.Namespace) -> int:
 def _analyze(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
     configure_logging(config.app.log_level)
-    provider_name = config.models.profiles[args.profile].provider
-    provider_kind = config.models.providers[provider_name].kind
-    if provider_kind != "ollama" and not args.allow_cloud:
-        print("error: cloud analysis requires --allow-cloud", file=sys.stderr)
+    args.profile = args.profile or config.app.default_profile
+    if args.profile == "batch" and not config.app.batch_research_enabled:
+        print("error: batch research is paused; use single-stock --profile deep", file=sys.stderr)
         return 2
+    if config.app.analysis_backend == "current_agent" and args.mode == "quick":
+        print("error: quick research is paused in current-agent mode; use --mode full or data", file=sys.stderr)
+        return 2
+    if config.app.analysis_backend == "api":
+        provider_name = config.models.profiles[args.profile].provider
+        provider_kind = config.models.providers[provider_name].kind
+        if provider_kind != "ollama" and not args.allow_cloud:
+            print("error: cloud analysis requires --allow-cloud", file=sys.stderr)
+            return 2
 
     _, _, code6 = norm_code(args.code)
     datapack = (
@@ -337,6 +371,15 @@ def _analyze(args: argparse.Namespace) -> int:
     )
     run_dir = config.root / config.app.run_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if config.app.analysis_backend == "current_agent":
+        state = prepare_current_agent_task(
+            config, datapack, run_dir, trade_context,
+            mode=args.mode, include_news=args.include_news, allow_web=args.allow_web,
+            run_kind=args.run_kind,
+        )
+        print(json.dumps(state, ensure_ascii=False, indent=2))
+        print("Read CURRENT_AGENT_TASK.md and complete analysis in the current chat; no model API was called.")
+        return 0
     configure_logging(
         config.app.log_level,
         log_path=run_dir / "run.log",
@@ -371,6 +414,12 @@ def _analyze(args: argparse.Namespace) -> int:
 def _report(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
     run_dir = config.root / config.app.run_dir / args.run_id
+    state_path = run_dir / "run.json"
+    if state_path.is_file():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if state.get("status") in {"AWAITING_CURRENT_AGENT", "DATA_READY"}:
+            print("error: analysis is not complete; cannot render a final report", file=sys.stderr)
+            return 2
     datapack = Path(args.datapack).expanduser().resolve()
     audit = build_report(run_dir, datapack)
     print(json.dumps(audit, ensure_ascii=False, indent=2))

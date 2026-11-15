@@ -1,3 +1,5 @@
+> 2026-11-16 执行策略更新：单股精读默认由当前聊天 agent 直接完成，批量研究暂停；本文 API 工作流描述/评估为历史实现记录。当前操作以 README、operations.md 和 AGENTS.md 为准。
+
 # Trade-Council Architecture
 
 当前为 Phase 9 试运行与验收阶段，包含配置、数据、模型、编排、决策规则、报告门禁、

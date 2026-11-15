@@ -1,3 +1,6 @@
+# 历史 API 配置，仅用于旧运行兼容和回归测试。
+# 当前个股精读由 app.yaml: analysis_backend=current_agent 控制，不使用以下服务。
+# batch 已由 app.yaml: batch_research_enabled=false 暂停。
 providers:
   ollama:
     kind: ollama
