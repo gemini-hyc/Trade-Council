@@ -27,6 +27,8 @@ batch_research_enabled: false
 ```bash
 PYTHONPATH=src .venv/bin/python -m trade_council config validate
 PYTHONPATH=src .venv/bin/python -m trade_council analyze 600362.SH --asof 2026-11-13
+PYTHONPATH=src .venv/bin/python -m trade_council validate --run-id <run_id>
+PYTHONPATH=src .venv/bin/python -m trade_council finalize --run-id <run_id>
 ```
 
 `analyze` 准备本地数据，生成：
@@ -38,7 +40,11 @@ runs/<run_id>/current_agent_request.json  冻结的角色提示词、Schema、�
 runs/datapacks/<代码>/                    数据摘要、manifest、evidence、明细
 ```
 
+数据包在这一步被冻结（`snapshot_files.json` + `content_hash`），运行记录写入 `input_binding`；之后改动数据包会让运行失效。
+
 **终端程序无法自行调用当前聊天会话的大模型。** 在聊天中让当前 agent 继续执行生成的任务。它需要实际读取数据，完成各角色分析及核查，保存产物并交付报告。仅生成上述文件不表示分析完成，尚未完成时 `report` 命令会拒绝生成最终报告。
+
+完成分析后必须写 `research_questions.json`、`claims.json`、`research_decision.json`（可选 `data_gaps.json`、`trading_rules.json`），再依次跑 `validate` 与 `finalize`。`finalize` 通过才写正式报告，审计失败只留草稿。补证与修订用 `research import-evidence` / `research revise`，字段见 `docs/implementation/schemas.md`。
 
 常用参数：`--datapack <路径>`、`--run-id <ID>`、`--resume`、`--include-news`、`--capital`、`--position-state`、`--position-shares`、`--position-opened-date`。不填写账户信息也能做研究，具体股数与账户仓位保留为未知。
 
@@ -54,4 +60,4 @@ PYTHONPATH=src .venv/bin/python -m pytest
 
 项目保留历史 API 工作流代码、数据时点过滤、Schema、方法包机制、风控规则及报告审计，用于兼容和回归；当前主线无需启动 API 工作流。黄金样例与历史审计成绩验证软件行为，不代表选股收益。
 
-操作说明见 `docs/operations.md`，agent 执行约定见 `AGENTS.md`，历史评估见 `docs/evaluation.md`。
+实施验收记录见 `docs/implementation/acceptance.md`，操作说明见 `docs/operations.md`，agent 执行约定见 `AGENTS.md`，历史评估见 `docs/evaluation.md`。
