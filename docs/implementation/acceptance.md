@@ -166,18 +166,30 @@ mypy src            Success: no issues found in 61 source files
 ## 11. Git 与同步
 
 - 本地提交序列：`71ea7f6` → `0192918` → `5a3090c` → `b8aa60c` → `14effa5` → `9097d49` → `e697417` → 本次文档提交。
-- 远端同步：见 §12（本轮 `git fetch origin` 因本机代理不可用失败，只影响推送，
-  不影响本地实施与验证；不使用强推）。
+- 远端同步：已完成（见 §12）。
 
 ## 12. 同步结果
 
-同步尝试记录见下（命令与实际输出按当次运行填写）：
+第一次失败原因（已定位，非仓库问题）：
 
 ```
-git fetch origin  → Failed to connect to 127.0.0.1 port 58731（代理不可用）
+git fetch origin
+→ fatal: unable to access ...: Failed to connect to 127.0.0.1 port 58731
 ```
 
-处理方式：保留本地提交，不 force push，不改写历史；待网络恢复后执行
-`git push origin main` 并补充实际提交 ID。
+`~/.gitconfig` 里 `http.proxy` 指向已失效的 `127.0.0.1:58731`，而当前会话的代理是
+`127.0.0.1:50013`；https 通道还缺少可非交互读取的凭证（osxkeychain 里没有该仓库条目）。
 
-（本次已在网络可用时重试；如仍失败，以本段为阻塞说明。）
+实际处理：改用 SSH 通道推送，未改 remote 配置、未强推、未改写历史：
+
+```
+git ls-remote git@github.com:gemini-hyc/Trade-Council.git   # 连通
+git push git@github.com:gemini-hyc/Trade-Council.git main:main
+→ bdb38ab..9da1b75  main -> main（快进）
+```
+
+`bdb38ab` 是本次实施前远端 HEAD，`9da1b75` 是本次全部代码与验收文档的提交。
+本条同步记录所在的文档提交在同一分支上，随后以同样方式推送。
+
+遗留配置问题（不属于本次代码范围）：建议把 `~/.gitconfig` 的 `http.proxy` 改为当前
+代理端口或删除，并为 https 通道配置可用的凭证方式，否则后续 https 操作仍需改走 SSH。
