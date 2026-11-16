@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..dates import is_after
 from ..decision.risk_rules import TradeContext, load_risk_policy, validate_decision
 from ..engineering.evidence import infer_value_type
 
@@ -261,12 +262,10 @@ def audit_report(
 
     # Point-in-time: no evidence may be available after the run's as-of date.
     if asof:
-        cutoff = str(asof)[:10]
         late = [
             str(item.get("evidence_id"))
             for item in evidence_records.values()
-            if item.get("available_at")
-            and str(item.get("available_at"))[:10] > cutoff
+            if is_after(item.get("available_at"), asof)
         ]
         expect(
             "Evidence available after as-of: " + ", ".join(late[:5]),

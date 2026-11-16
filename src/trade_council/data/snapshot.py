@@ -13,9 +13,11 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-#: ``manifest.json`` carries the hash list itself and ``snapshot_files.json`` is
-#: the hash list, so neither can be part of the content hash they record.
-EXCLUDED_FILES = {"manifest.json", "snapshot_files.json"}
+#: ``manifest.json`` and ``snapshot.json`` carry the hash list itself and
+#: ``snapshot_files.json`` is the hash list, so none of them can be part of the
+#: content hash they record: writing the recorded hash back into them would
+#: change the very bytes being hashed.
+EXCLUDED_FILES = {"manifest.json", "snapshot.json", "snapshot_files.json"}
 HASHES_FILE = "snapshot_files.json"
 
 

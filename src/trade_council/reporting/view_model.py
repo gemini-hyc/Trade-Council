@@ -39,6 +39,22 @@ ASSESSMENT_LABELS = {
     "actionable": "可执行",
 }
 
+QUARTER_STATUS_LABELS = {
+    "ok": "正常",
+    "missing_predecessor": "缺上一季，单季不可得",
+    "restated_incomparable": "重述不可比",
+    "missing_value": "缺值",
+    "missing_field": "缺字段",
+}
+
+QUARTER_STATUS_LABELS = {
+    "ok": "正常",
+    "missing_predecessor": "缺上一季，单季不可得",
+    "restated_incomparable": "重述不可比",
+    "missing_value": "缺值",
+    "missing_field": "缺字段",
+}
+
 CLAIM_STATUS_LABELS = {
     "intact": "成立",
     "weakened": "被削弱",
@@ -104,7 +120,7 @@ def _financial_block(datapack_dir: Path) -> dict[str, Any]:
                 {"text": row.get("end_date", "")},
                 {"text": _num(row.get("revenue_q")), "numeric": True, "source": "financial_quarters.csv:revenue_q"},
                 {"text": _num(row.get("n_income_attr_p_q")), "numeric": True, "source": "financial_quarters.csv:n_income_attr_p_q"},
-                {"text": row.get("quarter_status", ""), "muted": True},
+                {"text": QUARTER_STATUS_LABELS.get(str(row.get("quarter_status")), str(row.get("quarter_status") or "")), "muted": True},
             ]
         )
     return {
@@ -441,6 +457,7 @@ def build_view_model(
         "schema_version": SCHEMA_VERSION,
         "meta": {
             "symbol": run.get("symbol", ""),
+            "stock_name": run.get("stock_name") or run.get("symbol", ""),
             "asof": asof,
             "mode": run.get("mode", ""),
             "profile": run.get("profile", ""),

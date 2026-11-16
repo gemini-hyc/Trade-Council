@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..dates import to_iso_date
+
 GapKind = Literal["NOT_EXTRACTED", "NOT_DISCLOSED", "STALE", "NOT_APPLICABLE"]
 Priority = Literal["critical", "material", "minor"]
 
@@ -89,11 +91,8 @@ class GapRecord(BaseModel):
 
 
 def _parse_date(value: str) -> date | None:
-    text = value.strip()[:10].replace("/", "-")
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        return None
+    iso = to_iso_date(value)
+    return date.fromisoformat(iso) if iso else None
 
 
 def freshness_check(dataset_id: str, available_at: str, asof: str) -> dict[str, object]:

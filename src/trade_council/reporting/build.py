@@ -292,19 +292,15 @@ def _md_block(block: dict[str, Any]) -> list[str]:
             lines.append("| " + " | ".join(cell.get("text", "") for cell in row) + " |")
         lines.append("")
     elif kind == "chart":
-        lines.extend(
-            [
-                f"（{block.get('caption', '图表')}；图形见 HTML 版本）",
-                "",
-            ]
-        )
+        caption = str(block.get("caption") or "图表").rstrip("。；")
+        lines.extend([f"（{caption}。图形见 HTML 版本）", ""])
     return lines
 
 
 def render_markdown(view: dict[str, Any]) -> str:
     meta = view["meta"]
     lines = [
-        f"# {meta.get('symbol', '')} 决策研究 · {meta.get('asof', '')}",
+        f"# {meta.get('stock_name') or meta.get('symbol', '')}（{meta.get('symbol', '')}）决策研究 · {meta.get('asof', '')}",
         "",
         f"- 运行：`{meta.get('run_id', '')}`（{meta.get('mode', '')} / {meta.get('profile', '')}）",
         (
@@ -585,7 +581,7 @@ def render_html(
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trade-Council · {html_module.escape(str(meta.get('symbol', '')))}</title>
+<title>Trade-Council · {html_module.escape(str(meta.get('stock_name') or meta.get('symbol', '')))}</title>
 <style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#f1f5f9;color:#0f172a;margin:0;padding:24px}}
 main{{max-width:1080px;margin:auto}} .card{{background:white;border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 2px 10px #0f172a12}}
@@ -599,7 +595,7 @@ details{{border-top:1px solid #e2e8f0;padding:8px 0}}
 </style></head>
 <body><main>
 <section class="card decision">
-<div class="muted">Trade-Council · {html_module.escape(str(meta.get('symbol', '')))} · {html_module.escape(str(meta.get('asof', '')))}</div>
+<div class="muted">Trade-Council · {html_module.escape(str(meta.get('stock_name') or meta.get('symbol', '')))} · {html_module.escape(str(meta.get('asof', '')))}</div>
 <h1><span data-decision-field="action">{action}</span></h1>
 <div class="grid">
 <div class="metric">信心：<span data-decision-field="confidence">{html_module.escape(str(meta.get('confidence', 'low')))}</span></div>

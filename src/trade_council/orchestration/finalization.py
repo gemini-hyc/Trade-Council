@@ -16,6 +16,7 @@ from typing import Any, cast
 import pandas as pd
 
 from ..config import ProjectConfig
+from ..dates import is_after, to_iso_date
 from ..decision.risk_rules import tradability_status
 from ..decision.rule_tree import load_rule_tree, validate_rule_tree
 from ..engineering.financials import INCOME_FLOW_FIELDS, FinancialDataError, quarterize
@@ -598,11 +599,11 @@ def validate_run(config: ProjectConfig, run_id: str) -> ValidationReport:
         if item is None:
             report.fail("EVIDENCE_UNKNOWN", f"引用了不存在的证据：{evidence_id}", where)
             continue
-        available_at = str(item.get("available_at") or "")[:10]
-        if asof and available_at and available_at > asof:
+        if is_after(item.get("available_at"), asof):
             report.fail(
                 "EVIDENCE_FUTURE",
-                f"证据 {evidence_id} 在 {available_at} 才可得，晚于基准日 {asof}",
+                f"证据 {evidence_id} 在 {to_iso_date(item.get('available_at'))} 才可得，"
+                f"晚于基准日 {to_iso_date(asof)}",
                 where,
             )
         value_type = str(item.get("value_type") or "")
