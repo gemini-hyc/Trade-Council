@@ -17,6 +17,7 @@ import pandas as pd
 
 from ..config import ProjectConfig
 from ..decision.risk_rules import tradability_status
+from ..decision.rule_tree import load_rule_tree, validate_rule_tree
 from ..engineering.financials import INCOME_FLOW_FIELDS, FinancialDataError, quarterize
 from ..reporting.build import build_report
 from ..research.gaps import GAP_LABELS, GapRecord
@@ -31,6 +32,7 @@ ROLE_MODELS: dict[str, type[Any]] = {
 }
 RESEARCH_ARTIFACTS = ("research_questions.json", "claims.json", "research_decision.json")
 GAP_FILE = "data_gaps.json"
+RULE_FILE = "trading_rules.json"
 READY_STATUSES = {
     "AWAITING_CURRENT_AGENT",
     "DATA_READY",
@@ -491,6 +493,43 @@ def _validate_valuation(report: ValidationReport, research: dict[str, Any]) -> N
             )
 
 
+def _validate_rule_tree(
+    report: ValidationReport,
+    run_dir: Path,
+    research: dict[str, Any],
+) -> None:
+    """A rule tree may only drive an action when it is internally consistent."""
+
+    path = run_dir / RULE_FILE
+    try:
+        tree = load_rule_tree(path)
+    except Exception as exc:  # noqa: BLE001
+        report.fail("RULE_SCHEMA_INVALID", f"trading_rules.json 不符合 Schema：{exc}", str(path))
+        return
+    if tree is None:
+        return
+    errors, notes = validate_rule_tree(tree, available_data="daily")
+    for message in errors:
+        report.fail(message.split(":", 1)[0], message, str(path))
+    for note in notes:
+        report.note(note.split(":", 1)[0], note, str(path))
+    if errors and (research.get("execution") or {}).get("status") == "actionable":
+        report.fail(
+            "RULE_TREE_BLOCKS_ACTION",
+            "交易规则树存在冲突或未验证触发，不能标为可执行",
+            str(path),
+        )
+
+
+def _validate_dividend_treatment(report: ValidationReport, research: dict[str, Any]) -> None:
+    if str(research.get("dividend_treatment") or "none") == "assumption":
+        report.warn(
+            "DIVIDEND_ASSUMPTION",
+            "股息按假设处理，不得把滚动股息率乘持有月数当作确定现金流，也不得进入主收益表",
+            str(report.run_id),
+        )
+
+
 def validate_run(config: ProjectConfig, run_id: str) -> ValidationReport:
     """Check a run without calling a model and without marking it complete."""
 
@@ -546,6 +585,8 @@ def validate_run(config: ProjectConfig, run_id: str) -> ValidationReport:
     _validate_valuation(report, research)
     pending_reviews = _validate_revisions(report, run_dir, run)
     _validate_execution(report, run, research, decision, datapack, pending_reviews)
+    _validate_rule_tree(report, run_dir, research)
+    _validate_dividend_treatment(report, research)
 
     evidence = load_evidence_universe(datapack, run_dir)
     report.evidence_count = len(evidence)

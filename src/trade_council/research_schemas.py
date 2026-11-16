@@ -113,6 +113,7 @@ class ResearchDecision(ResearchModel):
     invalidation_conditions: list[str] = Field(default_factory=list)
     execution: ExecutionPlan = Field(default_factory=ExecutionPlan)
     valuation_reference: ValuationReference | None = None
+    dividend_treatment: Literal["none", "announced_event", "assumption"] = "none"
     evidence_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
 
