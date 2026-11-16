@@ -37,6 +37,7 @@ import pyarrow.dataset as pads
 
 from ..data.local_quant import LocalQuantProvider
 from ..data.registry import DatasetRegistry
+from ..data.snapshot import freeze as freeze_snapshot
 from .evidence import EvidenceIndex
 from .events import append_event_digest, load_events, write_event_artifacts
 from .financials import CALC_RULES_VERSION, build_financial_artifacts
@@ -1239,6 +1240,27 @@ def build(
     )
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ---------- 14. 冻结内容哈希 ----------
+    # snapshot_id 只标识“选了哪些源数据”，不证明磁盘上的字节。这里为每个
+    # 产出文件记录 sha256，并写一个汇总 content_hash，供 run 绑定时核对。
+    frozen = freeze_snapshot(out_dir)
+    manifest["content_hash"] = frozen["content_hash"]
+    manifest["hashes_file"] = "snapshot_files.json"
+    manifest["hashed_files"] = len(frozen["files"])
+    manifest["files"] = sorted(
+        p.name for p in out_dir.glob("*") if p.is_file()
+    )
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot_path = out_dir / "snapshot.json"
+    if snapshot_path.is_file():
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot["content_hash"] = frozen["content_hash"]
+        snapshot["hash_algorithm"] = "sha256"
+        snapshot["hashes_file"] = "snapshot_files.json"
+        snapshot_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ---------- 控制台摘要 ----------
     bad = [it for it in REG.items if it["status"] not in ("OK",)]

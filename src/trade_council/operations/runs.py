@@ -280,8 +280,9 @@ def export_report(
     run_id: str,
     *,
     out_dir: Path | None = None,
+    runs_root: Path | None = None,
 ) -> Path:
-    run_dir = project_root / "runs" / run_id
+    run_dir = (runs_root or (project_root / "runs")) / run_id
     report = run_dir / "report.html"
     if not report.is_file():
         raise OperationError(f"Report not found: {report}")
