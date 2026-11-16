@@ -15,6 +15,7 @@ from ..decision.risk_rules import BoardRule, TradeContext, board_rule_for, t_plu
 from ..engineering.evidence import infer_value_type
 from .audit import audit_report
 from .scoring import Scorecard, load_scorecard
+from .view_model import build_view_model
 
 DOMAIN_LABELS = {
     "technical": "技术面",
@@ -199,176 +200,365 @@ def _format_number(value: Any, source: str) -> str:
     )
 
 
-def render_markdown(
+def _load_research_artifacts(run_dir: Path) -> dict[str, Any]:
+    def read(name: str) -> Any:
+        path = run_dir / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    research = read("research_decision.json") or {}
+    claims_payload = read("claims.json") or {}
+    claims = claims_payload.get("claims") if isinstance(claims_payload, dict) else claims_payload
+    questions_payload = read("research_questions.json") or {}
+    questions = (
+        questions_payload.get("questions")
+        if isinstance(questions_payload, dict)
+        else questions_payload
+    )
+    gaps_payload = read("data_gaps.json") or {}
+    gaps = gaps_payload.get("gaps") if isinstance(gaps_payload, dict) else gaps_payload
+    revisions: list[dict[str, Any]] = []
+    revision_path = run_dir / "revisions.jsonl"
+    if revision_path.is_file():
+        for line in revision_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                revisions.append(json.loads(line))
+    return {
+        "research": research if isinstance(research, dict) else {},
+        "claims": claims if isinstance(claims, list) else [],
+        "questions": questions if isinstance(questions, list) else [],
+        "gaps": gaps if isinstance(gaps, list) else [],
+        "revisions": revisions,
+    }
+
+
+def build_view(
     *,
     run: dict[str, Any],
+    run_dir: Path,
     decision: dict[str, Any],
     roles: dict[str, dict[str, Any]],
     evidence: dict[str, Any],
+    enabled_domains: list[str],
     market_rules_path: Path,
-) -> str:
-    context = _trade_context_from_run(run)
-    board_rule = board_rule_for(
-        market_rules_path,
-        market=context.market,
-        board=context.board,
+    datapack_dir: Path,
+    scorecard: Scorecard | None = None,
+) -> dict[str, Any]:
+    """Single source for every output format."""
+
+    artifacts = _load_research_artifacts(run_dir)
+    return build_view_model(
+        run=run,
+        run_dir=run_dir,
+        decision=decision,
+        roles=roles,
+        evidence=evidence,
+        research=artifacts["research"],
+        claims=artifacts["claims"],
+        questions=artifacts["questions"],
+        gaps=artifacts["gaps"],
+        revisions=artifacts["revisions"],
+        datapack_dir=datapack_dir,
+        enabled_domains=enabled_domains,
+        market_rules_path=market_rules_path,
+        asof=str(run.get("asof", ""))[:10],
+        scorecard=scorecard,
     )
-    t_plus_status = _t_plus_status(
-        decision,
-        context,
-        board_rule,
-        str(run.get("asof", "")),
-    )
-    lines = [
-        f"# Trade-Council 分析摘要 · {run.get('symbol', '')}",
-        "",
-        f"- 基准日：{run.get('asof', '')}",
-        f"- 模式：{run.get('mode')} / {run.get('profile')}",
-        f"- 最终决策：**{decision.get('action', 'INSUFFICIENT_DATA')}**",
-        f"- 信心：{decision.get('confidence', 'low')}",
-        f"- 风险等级：{decision.get('risk_level', 'medium')}",
-        f"- 账户资金：{_display_value(context.capital)}",
-        f"- 持仓状态：{_display_value(context.position_state)}",
-        f"- 当前持仓股数：{_display_value(context.position_shares)}",
-        f"- 建仓日期：{_display_value(context.position_opened_date)}",
-        f"- 板块/申报单位：{context.board} / lot={board_rule.lot_size}, step={board_rule.step}",
-        f"- 拟交易股数：{_display_value(decision.get('position_shares'))}",
-        f"- 拟交易金额：{_display_value(decision.get('position_amount'))}",
-        f"- T+1 状态：{t_plus_status}",
-        "",
-    ]
-    data_needs = run.get("data_needs", [])
-    web_supplement = run.get("web_supplement", {})
-    if data_needs or web_supplement:
+
+
+def _md_block(block: dict[str, Any]) -> list[str]:
+    kind = block.get("kind")
+    lines: list[str] = []
+    if kind == "paragraph":
+        lines.extend([str(block.get("text", "")), ""])
+    elif kind == "callout":
+        lines.extend([f"> {block.get('text', '')}", ""])
+    elif kind == "kv":
+        for label, value in block.get("rows", []):
+            lines.append(f"- {label['text']}：{value['text']}")
+        lines.append("")
+    elif kind == "bullets":
+        if block.get("title"):
+            lines.extend([f"**{block['title']}**", ""])
+        items = block.get("items") or ["无"]
+        lines.extend(f"- {item}" for item in items)
+        lines.append("")
+    elif kind == "table":
+        if block.get("caption"):
+            lines.extend([f"*{block['caption']}*", ""])
+        header = "| " + " | ".join(block.get("columns", [])) + " |"
+        divider = "|" + "---|" * len(block.get("columns", []))
+        lines.extend([header, divider])
+        for row in block.get("rows", []):
+            lines.append("| " + " | ".join(cell.get("text", "") for cell in row) + " |")
+        lines.append("")
+    elif kind == "chart":
         lines.extend(
             [
-                "## 数据补充",
+                f"（{block.get('caption', '图表')}；图形见 HTML 版本）",
                 "",
-                f"- 补数状态：{web_supplement.get('status', 'not_run')}",
             ]
         )
-        for need in data_needs:
-            lines.append(
-                f"- `{need.get('need_id')}`：{need.get('dataset_id')} / "
-                f"{need.get('field')}（{need.get('priority')}）"
-            )
-        for result in web_supplement.get("results", []):
-            lines.append(
-                f"- 结果 `{result.get('need_id')}`：{result.get('status')}"
-            )
-            if result.get("missing_fields"):
-                lines.append(
-                    "  - 未提取字段："
-                    + "、".join(str(field) for field in result["missing_fields"])
-                )
-            if result.get("error"):
-                lines.append(f"  - 错误：{result['error']}")
-            for source in result.get("sources", []):
-                lines.append(f"  - {source.get('title')}：{source.get('url')}")
+    return lines
+
+
+def render_markdown(view: dict[str, Any]) -> str:
+    meta = view["meta"]
+    lines = [
+        f"# {meta.get('symbol', '')} 决策研究 · {meta.get('asof', '')}",
+        "",
+        f"- 运行：`{meta.get('run_id', '')}`（{meta.get('mode', '')} / {meta.get('profile', '')}）",
+        (
+            f"- 动作：**{meta.get('action', '')}**，信心 {meta.get('confidence', '')}，"
+            f"风险 {meta.get('risk_level', '')}"
+        ),
+        (
+            f"- 启用角色：{len(meta.get('enabled_roles') or [])} 个；"
+            f"启用分析域：{', '.join(meta.get('enabled_domains') or [])}"
+        ),
+        f"- 证据快照：`{meta.get('snapshot_id', '')}`",
+        "",
+    ]
+    for section in view["sections"]:
+        lines.extend([f"## {section['title']}", ""])
+        for block in section["blocks"]:
+            lines.extend(_md_block(block))
+    appendix = view["appendix"]
+    lines.extend(["## 附录", ""])
+    lines.extend(["### 实际启用角色", ""])
+    for role in appendix["roles"]:
+        lines.append(f"- `{role['role_id']}`（{role.get('stance') or '未标注立场'}）：{role.get('summary', '')}")
+    lines.append("")
+    if appendix["debate"]:
+        lines.extend(["### 多空最强论点", ""])
+        for role_id, summary in appendix["debate"].items():
+            lines.append(f"- **{role_id}**：{summary}")
         lines.append("")
-    if decision.get("rationale"):
-        lines.extend(["## 核心结论", "", str(decision["rationale"]), ""])
-    for role_id in ("bull-researcher", "bear-researcher", "risk-manager"):
-        if role_id in roles:
-            lines.extend([f"## {role_id}", "", _format_role(roles[role_id]), ""])
-    gaps = decision.get("data_gaps", [])
-    if gaps:
-        lines.extend(["## 数据缺口", ""])
-        lines.extend(f"- {gap}" for gap in gaps)
+    if appendix["disagreements"]:
+        lines.extend(["### 重大分歧与已失效论点", ""])
+        for item in appendix["disagreements"]:
+            lines.append(
+                f"- `{item['claim_id']}`（{item['status']}）：{item['statement']}"
+                + (f"；原因：{item['reason']}" if item.get("reason") else "")
+            )
         lines.append("")
-    rule_checks = decision.get("rule_checks", [])
-    if rule_checks:
-        lines.extend(["## 风控规则命中", ""])
-        lines.extend(f"- `{rule_id}`" for rule_id in rule_checks)
+    if appendix["revisions"]:
+        lines.extend(["### 更正记录", ""])
+        for record in appendix["revisions"]:
+            lines.append(
+                f"- {record.get('revision_id')}（{record.get('created_at', '')}）："
+                f"{record.get('before', '')} → {record.get('after', '')}"
+                f"；复核={'已完成' if record.get('reviewed') else '未完成'}"
+            )
+        lines.append("")
+    if appendix["gaps"]:
+        lines.extend(["### 数据缺口", ""])
+        for gap in appendix["gaps"]:
+            lines.append(
+                f"- `{gap.get('gap_id')}`（{gap.get('kind')}，{gap.get('priority')}）："
+                f"{gap.get('dataset_id')} / {gap.get('field') or '—'}；"
+                f"检查范围：{gap.get('scope_of_check') or '未填写'}；"
+                f"下一步：{gap.get('next_step') or '未填写'}"
+            )
         lines.append("")
     lines.extend(
         [
-            "## 证据",
+            "### 证据索引",
             "",
-            f"- 证据条数：{len(evidence.get('items', []))}",
-            f"- Snapshot：`{evidence.get('snapshot_id', '')}`",
+            (
+                f"共 {len(appendix['evidence'])} 条证据，字段级可追溯；"
+                "HTML 版本含来源链接与可用时点。"
+            ),
             "",
-            "> 以上内容仅供研究参考，不构成投资建议。",
+            "> 本报告由结构化结果生成，仅供研究参考，不构成投资建议。",
         ]
     )
     return "\n".join(lines)
 
 
+def _supplement_html(run: dict[str, Any]) -> str:
+    """Task-scoped supplement trail: what was asked for and what came back."""
+
+    data_needs = run.get("data_needs") or []
+    web_supplement = run.get("web_supplement") or {}
+    if not data_needs and not web_supplement:
+        return ""
+    need_rows = "".join(
+        f"<li><code>{html_module.escape(str(need.get('need_id')))}</code>："
+        f"{html_module.escape(str(need.get('dataset_id')))} / "
+        f"{html_module.escape(str(need.get('field')))} "
+        f"<strong>{html_module.escape(str(need.get('priority')))}</strong></li>"
+        for need in data_needs
+    )
+    result_rows: list[str] = []
+    for result in web_supplement.get("results") or []:
+        result_rows.append(
+            f"<li><code>{html_module.escape(str(result.get('need_id')))}</code>："
+            f"{html_module.escape(str(result.get('status')))}</li>"
+        )
+        if result.get("missing_fields"):
+            result_rows.append(
+                "<li>未提取字段："
+                + html_module.escape("、".join(str(f) for f in result["missing_fields"]))
+                + "</li>"
+            )
+        if result.get("error"):
+            result_rows.append(f"<li>错误：{html_module.escape(str(result['error']))}</li>")
+        for source in result.get("sources") or []:
+            url = str(source.get("url") or "")
+            title = str(source.get("title") or url)
+            result_rows.append(
+                f'<li><a href="{html_module.escape(url)}" rel="noreferrer">'
+                f"{html_module.escape(title)}</a></li>"
+                if url
+                else "<li>无外部来源链接</li>"
+            )
+    return (
+        '<section class="card" data-supplement="true"><h2>任务级数据补充</h2>'
+        f"<p>状态：{html_module.escape(str(web_supplement.get('status', 'not_run')))}</p>"
+        f"<ul>{need_rows or '<li>无缺口</li>'}</ul>"
+        f"<ul>{''.join(result_rows) or '<li>无外部来源</li>'}</ul></section>"
+    )
+
+
+def _html_kv(block: dict[str, Any]) -> str:
+    rows = "".join(
+        f"<tr><th>{html_module.escape(label['text'])}</th>"
+        f"<td>{html_module.escape(value['text'])}</td></tr>"
+        for label, value in block.get("rows", [])
+    )
+    return f"<table><tbody>{rows}</tbody></table>"
+
+
+def _html_bullets(block: dict[str, Any], *, gap_marker: bool = False) -> str:
+    attributes = ' data-gap="true"' if gap_marker else ""
+    items = block.get("items") or ["无"]
+    body = "".join(f"<li{attributes}>{html_module.escape(str(item))}</li>" for item in items)
+    title = (
+        f"<h3>{html_module.escape(str(block['title']))}</h3>" if block.get("title") else ""
+    )
+    return f"{title}<ul>{body}</ul>"
+
+
+def _html_table(block: dict[str, Any]) -> str:
+    header = "".join(f"<th>{html_module.escape(str(name))}</th>" for name in block.get("columns", []))
+    rows = []
+    for row in block.get("rows", []):
+        cells = []
+        for cell in row:
+            text = str(cell.get("text", ""))
+            if cell.get("numeric"):
+                source = str(cell.get("source") or "structured")
+                rendered = _format_number(text, source)
+            else:
+                rendered = html_module.escape(text)
+            cells.append(f'<td class="{"muted" if cell.get("muted") else ""}">{rendered}</td>')
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    caption = (
+        f'<p class="muted">{html_module.escape(str(block["caption"]))}</p>'
+        if block.get("caption")
+        else ""
+    )
+    return (
+        f"{caption}<table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def render_html(
+    view: dict[str, Any],
     *,
-    run: dict[str, Any],
-    decision: dict[str, Any],
-    roles: dict[str, dict[str, Any]],
-    evidence: dict[str, Any],
     datapack_dir: Path,
-    enabled_domains: list[str],
-    market_rules_path: Path,
     scorecard: Scorecard | None = None,
+    run: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
+    market_rules_path: Path | None = None,
 ) -> tuple[str, int, int]:
+    """Render the view model to one HTML document."""
+
+    meta = view["meta"]
+    run = run or {}
+    decision = decision or {}
+    rules_path = market_rules_path or Path("__missing_market_rules__.yaml")
     context = _trade_context_from_run(run)
-    board_rule = board_rule_for(
-        market_rules_path,
-        market=context.market,
-        board=context.board,
-    )
-    t_plus_status = _t_plus_status(
-        decision,
-        context,
-        board_rule,
-        str(run.get("asof", "")),
-    )
+    board_rule = board_rule_for(rules_path, market=context.market, board=context.board)
+    t_plus_status = _t_plus_status(decision, context, board_rule, str(meta.get("asof", "")))
     price_svg, price_points, refs = _price_svg(datapack_dir)
-    scorecard_html, _scorecard_svg_markup = _render_scorecard(scorecard)
-    action = html_module.escape(str(decision.get("action", "INSUFFICIENT_DATA")))
-    confidence = html_module.escape(str(decision.get("confidence", "low")))
-    risk_level = html_module.escape(str(decision.get("risk_level", "medium")))
-    action_color = {"BUY": "#15803d", "SELL": "#b91c1c", "HOLD": "#a16207", "INSUFFICIENT_DATA": "#475569"}.get(
-        str(decision.get("action")), "#475569"
+    scorecard_html, _svg = _render_scorecard(scorecard)
+    action = html_module.escape(str(meta.get("action", "INSUFFICIENT_DATA")))
+    action_color = {
+        "BUY": "#15803d",
+        "SELL": "#b91c1c",
+        "HOLD": "#a16207",
+        "INSUFFICIENT_DATA": "#475569",
+    }.get(str(meta.get("action")), "#475569")
+    domain_tags = " ".join(
+        f'<span class="domain-pill" data-domain="{domain}">'
+        f"{DOMAIN_LABELS.get(domain, domain)}</span>"
+        for domain in meta.get("enabled_domains") or []
     )
-    domain_sections = []
-    role_domain = {
-        "market-analyst": "technical",
-        "fundamentals-analyst": "fundamental",
-        "news-analyst": "news",
-        "sentiment-analyst": "sentiment",
-    }
-    for role_id, domain in role_domain.items():
-        if role_id in roles:
-            domain_sections.append(_role_section(role_id, roles[role_id], domain))
-    # An announcement section is represented by the news/announcement role if present.
-    domain_tags = " ".join(f'<span class="domain-pill" data-domain="{domain}">{DOMAIN_LABELS.get(domain, domain)}</span>' for domain in enabled_domains)
-    gaps = decision.get("data_gaps", [])
-    gap_html = "".join(
-        f'<li data-gap="true">{html_module.escape(str(gap))}</li>' for gap in gaps
-    ) or "<li>无已记录缺口</li>"
-    rule_html = "".join(
-        f"<li><code>{html_module.escape(str(rule_id))}</code></li>"
-        for rule_id in decision.get("rule_checks", [])
-    ) or "<li>无规则命中</li>"
+    sections_html: list[str] = []
+    for section in view["sections"]:
+        blocks = []
+        for block in section["blocks"]:
+            kind = block.get("kind")
+            if kind == "paragraph":
+                blocks.append(f"<p>{html_module.escape(str(block.get('text', '')))}</p>")
+            elif kind == "callout":
+                blocks.append(f"<p class=\"callout\">{html_module.escape(str(block.get('text', '')))}</p>")
+            elif kind == "kv":
+                blocks.append(_html_kv(block))
+            elif kind == "bullets":
+                blocks.append(_html_bullets(block))
+            elif kind == "table":
+                blocks.append(_html_table(block))
+            elif kind == "chart":
+                blocks.append(
+                    f'{price_svg}<p class="muted">{html_module.escape(str(block.get("caption", "")))}</p>'
+                )
+        sections_html.append(
+            f'<section class="card" data-section="{section["id"]}">'
+            f"<h2>{html_module.escape(section['title'])}</h2>{''.join(blocks)}</section>"
+        )
+
+    appendix = view["appendix"]
+    role_html = "".join(
+        f'<details data-role="{role["role_id"]}"><summary>{html_module.escape(role["role_id"])}'
+        f"（{html_module.escape(str(role.get('stance') or '未标注立场'))}）</summary>"
+        f"<p>{html_module.escape(str(role.get('summary') or ''))}</p>"
+        "<ul>"
+        + "".join(
+            f"<li><strong>{html_module.escape(str(item.get('claim_id', 'claim')))}</strong>："
+            f"{html_module.escape(str(item.get('claim', '')))} "
+            f"<code>{html_module.escape(', '.join(item.get('evidence_ids') or []))}</code></li>"
+            for item in role.get("key_findings") or []
+        )
+        + "</ul></details>"
+        for role in appendix["roles"]
+    )
     debate_html = "".join(
-        f'<section data-role="{role_id}"><h2>{role_id}</h2><p>{html_module.escape(_format_role(roles[role_id]))}</p></section>'
-        for role_id in ("bull-researcher", "bear-researcher")
-        if role_id in roles
+        f'<section data-role="{role_id}"><h3>{html_module.escape(role_id)}</h3>'
+        f"<p>{html_module.escape(summary)}</p></section>"
+        for role_id, summary in appendix["debate"].items()
     )
-    risk_html = ""
-    if "risk-manager" in roles:
-        risk_html = _role_section("risk-manager", roles["risk-manager"], "risk")
-    trade_context_html = f"""
-<section class="card" data-trade-context="true">
-<h2>账户、持仓与交易制度</h2>
-<table><tbody>
-<tr><th>账户资金</th><td>{_format_number(_display_value(context.capital), "trade_context.capital")}</td></tr>
-<tr><th>持仓状态</th><td>{html_module.escape(_display_value(context.position_state))}</td></tr>
-<tr><th>当前持仓股数</th><td>{_format_number(_display_value(context.position_shares), "trade_context.position_shares")}</td></tr>
-<tr><th>建仓日期</th><td>{html_module.escape(_display_value(context.position_opened_date))}</td></tr>
-<tr><th>板块 / 申报单位</th><td>{html_module.escape(context.board)} / lot={board_rule.lot_size}, step={board_rule.step}</td></tr>
-<tr><th>拟交易股数</th><td><span data-decision-field="position_shares">{_format_number(_display_value(decision.get("position_shares")), "decision.position_shares")}</span></td></tr>
-<tr><th>拟交易金额</th><td><span data-decision-field="position_amount">{_format_number(_display_value(decision.get("position_amount")), "decision.position_shares*entry_zone")}</span></td></tr>
-<tr><th>交易对应建仓日期</th><td><span data-decision-field="position_opened_date">{html_module.escape(_display_value(decision.get("position_opened_date")))}</span></td></tr>
-<tr><th>T+1 状态</th><td><span data-decision-field="t_plus_one_status">{html_module.escape(t_plus_status)}</span></td></tr>
-</tbody></table>
-</section>
-"""
+    revision_html = "".join(
+        f"<li>{html_module.escape(str(record.get('revision_id')))}"
+        f"（{html_module.escape(str(record.get('created_at', '')))}）："
+        f"{html_module.escape(str(record.get('before', '')))} → "
+        f"{html_module.escape(str(record.get('after', '')))}；"
+        f"复核={'已完成' if record.get('reviewed') else '未完成'}</li>"
+        for record in appendix["revisions"]
+    )
+    gap_html = "".join(
+        f'<li data-gap-kind="{html_module.escape(str(gap.get("kind")))}">'
+        f"<code>{html_module.escape(str(gap.get('gap_id')))}</code>"
+        f"（{html_module.escape(str(gap.get('kind')))}/{html_module.escape(str(gap.get('priority')))}）："
+        f"{html_module.escape(str(gap.get('dataset_id')))} / "
+        f"{html_module.escape(str(gap.get('field') or '—'))}；"
+        f"检查范围：{html_module.escape(str(gap.get('scope_of_check') or '未填写'))}</li>"
+        for gap in appendix["gaps"]
+    )
+    decision_gap_html = "".join(
+        f'<li data-gap="true">{html_module.escape(str(gap))}</li>' for gap in meta.get("data_gaps") or []
+    )
     evidence_rows = "".join(
         "<tr>"
         f"<td><code>{html_module.escape(str(item.get('evidence_id')))}</code></td>"
@@ -381,60 +571,21 @@ def render_html(
         f"<td>{html_module.escape(str(item.get('source_level', 'local')))}</td>"
         f"<td>{html_module.escape(str(item.get('source_url') or '—'))}</td>"
         "</tr>"
-        for item in evidence.get("items", [])
+        for item in appendix["evidence"]
     )
-    supplemental_html = ""
-    data_needs = run.get("data_needs", [])
-    web_supplement = run.get("web_supplement", {})
-    if data_needs or web_supplement:
-        supplement_rows = "".join(
-            f"<li><code>{html_module.escape(str(need.get('need_id')))}</code>: "
-            f"{html_module.escape(str(need.get('dataset_id')))} / "
-            f"{html_module.escape(str(need.get('field')))} "
-            f"<strong>{html_module.escape(str(need.get('priority')))}</strong></li>"
-            for need in data_needs
-        )
-        source_rows = []
-        for result in web_supplement.get("results", []):
-            source_rows.append(
-                f"<li><code>{html_module.escape(str(result.get('need_id')))}</code>: "
-                f"{html_module.escape(str(result.get('status')))}"
-                + (
-                    "；未提取字段："
-                    + html_module.escape(
-                        "、".join(str(field) for field in result["missing_fields"])
-                    )
-                    if result.get("missing_fields")
-                    else ""
-                )
-                + (
-                    "；错误："
-                    + html_module.escape(str(result.get("error")))
-                    if result.get("error")
-                    else ""
-                )
-                + "</li>"
-            )
-            for source in result.get("sources", []):
-                url = str(source.get("url") or "")
-                source_rows.append(
-                    f'<li><a href="{html_module.escape(url)}" rel="noreferrer">'
-                    f'{html_module.escape(str(source.get("title") or url))}</a></li>'
-                    if url
-                    else "<li>无外部来源链接</li>"
-                )
-        supplemental_html = (
-            '<section class="card" data-supplement="true">'
-            "<h2>任务级数据补充</h2>"
-            f"<p>状态：{html_module.escape(str(web_supplement.get('status', 'not_run')))}</p>"
-            f"<ul>{supplement_rows or '<li>无缺口</li>'}</ul>"
-            f"<ul>{''.join(source_rows) or '<li>无外部来源</li>'}</ul>"
-            "</section>"
-        )
+    trade_fields = ""
+    if meta.get("action") in {"BUY", "SELL"}:
+        trade_fields = f"""
+<tr><th>拟交易股数</th><td><span data-decision-field="position_shares">{_format_number(meta.get('position_shares'), 'decision.position_shares')}</span></td></tr>
+<tr><th>拟交易金额</th><td><span data-decision-field="position_amount">{_format_number(meta.get('position_amount'), 'decision.position_amount')}</span></td></tr>
+<tr><th>建仓日期</th><td><span data-decision-field="position_opened_date">{html_module.escape(str(meta.get('position_opened_date') or '未提供'))}</span></td></tr>
+<tr><th>T+1 状态</th><td><span data-decision-field="t_plus_one_status">{html_module.escape(t_plus_status)}</span></td></tr>
+"""
+    supplement_html = _supplement_html(run)
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trade-Council · {html_module.escape(str(run.get('symbol', '')))}</title>
+<title>Trade-Council · {html_module.escape(str(meta.get('symbol', '')))}</title>
 <style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:#f1f5f9;color:#0f172a;margin:0;padding:24px}}
 main{{max-width:1080px;margin:auto}} .card{{background:white;border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 2px 10px #0f172a12}}
@@ -442,30 +593,33 @@ main{{max-width:1080px;margin:auto}} .card{{background:white;border-radius:14px;
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}} .metric{{background:#ffffff22;padding:12px;border-radius:8px}}
 .domain-pill{{display:inline-block;background:#dbeafe;color:#1e40af;padding:4px 9px;border-radius:999px;margin:3px}}
 table{{width:100%;border-collapse:collapse;font-size:13px}} td,th{{border-bottom:1px solid #e2e8f0;padding:7px;text-align:left}}
-code{{font-size:11px;overflow-wrap:anywhere}} svg{{max-width:100%;height:auto}} .muted{{color:#64748b}} 
+code{{font-size:11px;overflow-wrap:anywhere}} svg{{max-width:100%;height:auto}} .muted{{color:#64748b}}
+.callout{{background:#f8fafc;border-left:4px solid #94a3b8;padding:10px 12px}}
+details{{border-top:1px solid #e2e8f0;padding:8px 0}}
 </style></head>
 <body><main>
 <section class="card decision">
-<div class="muted">Trade-Council · {html_module.escape(str(run.get('symbol', '')))} · {html_module.escape(str(run.get('asof', '')))}</div>
+<div class="muted">Trade-Council · {html_module.escape(str(meta.get('symbol', '')))} · {html_module.escape(str(meta.get('asof', '')))}</div>
 <h1><span data-decision-field="action">{action}</span></h1>
 <div class="grid">
-<div class="metric">信心：<span data-decision-field="confidence">{confidence}</span></div>
-<div class="metric">风险：<span data-decision-field="risk_level">{risk_level}</span></div>
-<div class="metric">模式：{html_module.escape(str(run.get('profile', '')))}</div>
+<div class="metric">信心：<span data-decision-field="confidence">{html_module.escape(str(meta.get('confidence', 'low')))}</span></div>
+<div class="metric">风险：<span data-decision-field="risk_level">{html_module.escape(str(meta.get('risk_level', 'medium')))}</span></div>
+<div class="metric">模式：{html_module.escape(str(meta.get('profile', '')))}</div>
 </div></section>
 <section class="card"><h2>已启用分析域</h2>{domain_tags}</section>
-<section class="card"><h2>最终裁决</h2><p>{html_module.escape(str(decision.get('rationale', '')))}</p></section>
-{supplemental_html}
-{trade_context_html}
-<section class="card"><h2>多空辩论</h2>{debate_html or '<p>当前运行未生成辩论产物</p>'}</section>
-{''.join(domain_sections)}
-{risk_html}
-<section class="card" data-domain="technical"><h2>价格结构</h2>{price_svg}<p class="muted">近60日收盘价（未复权）；虚线为 MA20/MA60 参考线。复权口径用于水平类指标，真实委托价需单独换算。RSI 使用 Wilder 主口径，SMA RSI 仅作对照。</p></section>
+{f'<section class="card" data-trade-fields="true"><h2>账户动作与交易制度</h2><table><tbody>{trade_fields}</tbody></table></section>' if trade_fields else ''}
+{supplement_html}
+{''.join(sections_html)}
 {scorecard_html}
-<section class="card" data-domain="risk"><h2>风控规则命中</h2><ul>{rule_html}</ul></section>
-<section class="card"><h2>数据缺口</h2><ul>{gap_html}</ul></section>
-<section class="card"><h2>证据索引</h2><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>类型</th><th>可用时间</th><th>来源层级</th><th>来源链接</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
-<p class="muted">本报告仅供研究参考，不构成投资建议。</p>
+<section class="card" data-appendix="true"><h2>附录</h2>
+<h3>实际启用角色（{len(appendix['roles'])} 个）</h3>{role_html or '<p>无角色产物</p>'}
+{debate_html}
+<h3>数据缺口</h3><ul>{gap_html or '<li>未登记缺口</li>'}</ul>
+<h3>决策层缺口</h3><ul>{decision_gap_html or '<li>无已记录缺口</li>'}</ul>
+<h3>更正记录</h3><ul>{revision_html or '<li>无更正</li>'}</ul>
+<h3>证据索引</h3><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>类型</th><th>可用时间</th><th>来源层级</th><th>来源链接</th></tr></thead><tbody>{evidence_rows}</tbody></table>
+</section>
+<p class="muted">本报告由同一份结构化结果生成，仅供研究参考，不构成投资建议。</p>
 </main></body></html>"""
     return document, price_points, refs
 
@@ -523,22 +677,28 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
     market_rules_path = run_dir.parent.parent / "configs" / "market-rules.yaml"
     trade_context = _trade_context_from_run(run)
     scorecard = load_scorecard(run_dir / "risk_scorecard.json")
-    markdown = render_markdown(
+    view = build_view(
         run=run,
+        run_dir=run_dir,
         decision=decision,
         roles=roles,
         evidence=evidence,
-        market_rules_path=market_rules_path,
-    )
-    document, _price_points, _refs = render_html(
-        run=run,
-        decision=decision,
-        roles=roles,
-        evidence=evidence,
-        datapack_dir=datapack_dir,
         enabled_domains=enabled_domains,
         market_rules_path=market_rules_path,
+        datapack_dir=datapack_dir,
         scorecard=scorecard,
+    )
+    (run_dir / "report_view.json").write_text(
+        json.dumps(view, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    markdown = render_markdown(view)
+    document, _price_points, _refs = render_html(
+        view,
+        datapack_dir=datapack_dir,
+        scorecard=scorecard,
+        run=run,
+        decision=decision,
+        market_rules_path=market_rules_path,
     )
     data_gaps = decision.get("data_gaps", [])
     allow_trade = bool(run.get("capability_flags", {}).get("trade_instructions", False))

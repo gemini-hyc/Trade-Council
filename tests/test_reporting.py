@@ -510,3 +510,64 @@ def test_report_displays_task_scoped_supplemental_evidence(tmp_path: Path) -> No
         "Web evidence has no source_url" in issue["message"]
         for issue in audit_without_url["issues"]
     )
+
+
+def test_report_has_six_reader_sections_and_full_appendix(tmp_path: Path) -> None:
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    build_report(run_dir, datapack)
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    markdown = (run_dir / "report.md").read_text(encoding="utf-8")
+    for index, title in enumerate(
+        (
+            "当前研究判断",
+            "公司如何赚钱",
+            "财务与季度盈利桥接",
+            "估值与技术状态",
+            "账户约束与执行状态",
+            "下一次检查",
+        ),
+        start=1,
+    ):
+        assert f"{index}. {title}" in html
+        assert f"## {index}. {title}" in markdown
+    # Every enabled role keeps its own traceable block in the appendix.
+    roles = {path.stem for path in (run_dir / "agents").glob("phase*/*.json")}
+    assert len(roles) == 6
+    for role_id in roles:
+        assert f'data-role="{role_id}"' in html
+    assert "实际启用角色（6 个）" in html
+    # No invented model identity anywhere in the deliverable.
+    lowered = html.lower()
+    for forbidden in ("gpt", "deepseek", "claude", "模型版本"):
+        assert forbidden not in lowered
+
+
+def test_markdown_and_html_read_the_same_view_model(tmp_path: Path) -> None:
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    build_report(run_dir, datapack)
+    view = json.loads((run_dir / "report_view.json").read_text(encoding="utf-8"))
+    assert view["schema_version"] == "report-view-1"
+    assert [section["id"] for section in view["sections"]] == [
+        "verdict",
+        "business",
+        "financials",
+        "valuation",
+        "execution",
+        "next",
+    ]
+    # The decision card is rendered from meta, not typed twice.
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert f'data-decision-field="action">{view["meta"]["action"]}</span>' in html
+    assert len(view["appendix"]["roles"]) == 6
+    # Without a structured valuation reference the report refuses to name a fair price.
+    assert "本次没有提供结构化估值参照" in html
+
+
+def test_report_shows_missing_account_instead_of_inventing_sizes(tmp_path: Path) -> None:
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    build_report(run_dir, datapack)
+    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    assert "账户资金" in html
+    assert "未提供" in html
+    assert "目标账户权重" in html
+    assert "未设定" in html
