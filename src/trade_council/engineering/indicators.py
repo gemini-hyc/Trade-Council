@@ -2,8 +2,114 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
+
+MA_WINDOWS: tuple[int, ...] = (5, 10, 20, 30, 60, 120, 250)
+
+
+@dataclass(frozen=True)
+class MaAlignment:
+    """Result of strict adjacent moving-average comparison.
+
+    ``bull`` requires MA5 > MA10 > ... > MA250 with every adjacent pair strictly
+    ordered. Equal values, missing values, or insufficient samples are never
+    rounded into a bullish/bearish verdict.
+    """
+
+    state: str
+    label: str
+    detail: str
+    violations: tuple[str, ...] = ()
+
+    @property
+    def determinate(self) -> bool:
+        return self.state in {"bull", "bear"}
+
+
+def _is_missing(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def ma_alignment(
+    values: Sequence[float | None],
+    windows: Sequence[int] = MA_WINDOWS,
+    *,
+    name: str = "均线",
+) -> MaAlignment:
+    """Classify moving-average alignment using strict adjacent comparisons.
+
+    ``values`` must be ordered from the shortest to the longest window.
+    """
+
+    if len(values) != len(windows):
+        raise ValueError("values and windows must have the same length")
+    missing = [
+        f"MA{window}"
+        for window, value in zip(windows, values)
+        if _is_missing(value)
+    ]
+    if missing:
+        return MaAlignment(
+            state="undetermined",
+            label=f"{name}不可判",
+            detail=f"缺值或样本不足：{'、'.join(missing)}（{len(missing)}/{len(windows)} 条均线缺失）",
+            violations=tuple(missing),
+        )
+    numbers = [float(value) for value in values if value is not None]
+    labels = [f"MA{window}" for window in windows]
+    pairs = list(zip(labels[:-1], labels[1:], numbers[:-1], numbers[1:]))
+    equal_pairs = [f"{left}={right}" for left, right, a, b in pairs if a == b]
+    if equal_pairs:
+        return MaAlignment(
+            state="mixed",
+            label=f"{name}为混合/纠缠",
+            detail=f"相邻均线存在相等值，按严格不等式不能判定为多头或空头：{'、'.join(equal_pairs)}",
+            violations=tuple(equal_pairs),
+        )
+    descending = all(a > b for _, _, a, b in pairs)
+    ascending = all(a < b for _, _, a, b in pairs)
+    described = " > ".join(f"{label}={value:.2f}" for label, value in zip(labels, numbers))
+    if descending:
+        return MaAlignment(
+            state="bull",
+            label=f"{name}完全多头排列",
+            detail=f"相邻严格递减：{described}",
+        )
+    if ascending:
+        return MaAlignment(
+            state="bear",
+            label=f"{name}完全空头排列",
+            detail=f"相邻严格递增：{described}",
+        )
+    switches: list[str] = []
+    for index in range(1, len(pairs)):
+        left_before, right_before, a_before, b_before = pairs[index - 1]
+        left, right, a, b = pairs[index]
+        if (a_before < b_before) != (a < b):
+            switches.append(
+                f"{left_before}→{right_before}: {a_before:.2f} "
+                f"{'<' if a_before < b_before else '>'} {b_before:.2f}，"
+                f"但 {left}→{right}: {a:.2f} {'<' if a < b else '>'} {b:.2f}"
+            )
+    return MaAlignment(
+        state="mixed",
+        label=f"{name}为混合结构",
+        detail=(
+            f"相邻比较方向在以下位置反向：{'；'.join(switches)}"
+            if switches
+            else f"相邻比较方向不一致：{described}"
+        ),
+        violations=tuple(switches),
+    )
 
 
 def wilder_rsi(close: pd.Series, n: int = 14) -> pd.Series:

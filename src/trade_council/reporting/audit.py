@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..decision.risk_rules import TradeContext, load_risk_policy, validate_decision
+from ..engineering.evidence import infer_value_type
 
 
 def _attr(tag: str, name: str) -> str | None:
@@ -31,23 +32,49 @@ def audit_report(
     asof: str | None = None,
     evidence_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Check structure, numbers, and decision consistency.
+
+    The result deliberately carries no composite score: a 100-point "audit
+    score" would suggest research quality that this checker cannot establish.
+    Layers state what was checked and what remains outside program control.
+    """
+
     issues: list[dict[str, str]] = []
+    layers: dict[str, dict[str, Any]] = {
+        "data_references": {"checks": 0, "fail": 0, "scope": "哈希、时点、单位、证据ID、计算血缘"},
+        "calculation": {"checks": 0, "fail": 0, "scope": "季度差分、桥接、比例与路径闭合"},
+        "decision_text": {"checks": 0, "fail": 0, "scope": "价格、动作、规则、期限与结构化结果一致"},
+        "research_review": {
+            "checks": 0,
+            "fail": 0,
+            "scope": "关键反证、假设与因果跳跃由 agent 自述，程序不能证明其正确",
+        },
+    }
 
-    def add(level: str, message: str) -> None:
-        issues.append({"level": level, "message": message})
+    def add(level: str, message: str, layer: str = "decision_text") -> None:
+        issues.append({"level": level, "message": message, "layer": layer})
+        layers[layer]["checks"] += 1
+        if level == "FAIL":
+            layers[layer]["fail"] += 1
 
-    if not html.rstrip().lower().endswith("</html>"):
-        add("FAIL", "HTML is not closed")
-    if "traceable-number" not in html:
-        add("FAIL", "No traceable numbers found")
+    def expect(message: str, layer: str, ok: bool) -> None:
+        layers[layer]["checks"] += 1
+        if not ok:
+            add("FAIL", message, layer)
+
+    expect("HTML is not closed", "decision_text", html.rstrip().lower().endswith("</html>"))
+    expect("No traceable numbers found", "data_references", "traceable-number" in html)
     tags = re.findall(r"<[^>]+>", html)
     decision_fields = {
         value for tag in tags if (value := _attr(tag, "data-decision-field")) is not None
     }
     required_decisions = {"action", "confidence", "risk_level"}
     missing_decisions = sorted(required_decisions - decision_fields)
-    if missing_decisions:
-        add("FAIL", f"Decision fields missing: {', '.join(missing_decisions)}")
+    expect(
+        f"Decision fields missing: {', '.join(missing_decisions)}",
+        "decision_text",
+        not missing_decisions,
+    )
     for field in sorted(required_decisions):
         expected = str(decision.get(field, ""))
         match = re.search(
@@ -58,8 +85,11 @@ def audit_report(
         if match is None:
             continue
         rendered = html_module.unescape(re.sub(r"<[^>]+>", "", match.group(1))).strip()
-        if rendered != expected:
-            add("FAIL", f"Decision field {field} differs from decision.json")
+        expect(
+            f"Decision field {field} differs from decision.json",
+            "decision_text",
+            rendered == expected,
+        )
     if decision.get("action") in {"BUY", "SELL"}:
         required_trade_fields = {
             "position_shares",
@@ -68,43 +98,72 @@ def audit_report(
             "t_plus_one_status",
         }
         missing_trade_fields = sorted(required_trade_fields - decision_fields)
-        if missing_trade_fields:
-            add("FAIL", f"Trade fields missing: {', '.join(missing_trade_fields)}")
+        expect(
+            f"Trade fields missing: {', '.join(missing_trade_fields)}",
+            "decision_text",
+            not missing_trade_fields,
+        )
 
     domains = {
         value for tag in tags if (value := _attr(tag, "data-domain")) is not None
     }
     missing_domains = sorted(set(enabled_domains) - domains)
-    if missing_domains:
-        add("FAIL", f"Enabled domains missing: {', '.join(missing_domains)}")
+    expect(
+        f"Enabled domains missing: {', '.join(missing_domains)}",
+        "decision_text",
+        not missing_domains,
+    )
 
     chart_tags = [tag for tag in tags if _attr(tag, "data-chart") is not None]
-    if not chart_tags:
-        add("FAIL", "No chart elements found")
+    expect("No chart elements found", "calculation", bool(chart_tags))
     for tag in chart_tags:
         points = _attr(tag, "data-points")
         try:
             point_count = int(points or "0")
         except ValueError:
             point_count = 0
-        if point_count < 5:
-            add("FAIL", f"Chart has fewer than 5 points: {_attr(tag, 'data-chart')}")
+        chart_kind = _attr(tag, "data-chart")
+        # A radar needs at least three dimensions to be readable; a time-series
+        # line needs at least five observations. Two-point "charts" are noise.
+        minimum = 3 if chart_kind == "scorecard" else 5
+        expect(
+            f"Chart has fewer than {minimum} points: {chart_kind}",
+            "calculation",
+            point_count >= minimum,
+        )
 
-    if sum(1 for tag in tags if _attr(tag, "data-reference") is not None) < 2:
-        add("FAIL", "Price chart lacks reference lines")
-    if "technical" in enabled_domains and not ("Wilder" in html and "SMA" in html):
-        add("FAIL", "RSI dual-definition disclosure is missing")
+    expect(
+        "Price chart lacks reference lines",
+        "calculation",
+        sum(1 for tag in tags if _attr(tag, "data-reference") is not None) >= 2,
+    )
+    if "technical" in enabled_domains:
+        expect(
+            "RSI dual-definition disclosure is missing",
+            "calculation",
+            "Wilder" in html and "SMA" in html,
+        )
     for role_id in ("bull-researcher", "bear-researcher"):
-        if role_id in role_outputs and f'data-role="{role_id}"' not in html:
-            add("FAIL", f"Debate section missing: {role_id}")
+        if role_id in role_outputs:
+            expect(
+                f"Debate section missing: {role_id}",
+                "decision_text",
+                f'data-role="{role_id}"' in html,
+            )
 
     gap_markers = len(re.findall(r'data-gap="true"', html))
-    if gap_markers != len(data_gaps):
-        add("FAIL", f"Data-gap markers {gap_markers} != {len(data_gaps)}")
+    expect(
+        f"Data-gap markers {gap_markers} != {len(data_gaps)}",
+        "decision_text",
+        gap_markers == len(data_gaps),
+    )
 
     traceable_tags = re.findall(r'<span[^>]*class="[^"]*traceable-number[^"]*"[^>]*>', html)
-    if any(_attr(tag, "data-source") is None for tag in traceable_tags):
-        add("FAIL", "A traceable number has no data-source")
+    expect(
+        "A traceable number has no data-source",
+        "data_references",
+        not any(_attr(tag, "data-source") is None for tag in traceable_tags),
+    )
     evidence_path = data_pack_dir / "evidence.json"
     evidence_values: dict[str, Any] = {}
     evidence_records: dict[str, dict[str, Any]] = {}
@@ -136,35 +195,84 @@ def audit_report(
         r'<span[^>]*class="[^"]*traceable-number[^"]*"[^>]*>',
         html,
     )
-    if len(traceable_opens) != len(traceable_spans):
-        add("FAIL", "Traceable number markup is malformed")
+    expect(
+        "Traceable number markup is malformed",
+        "data_references",
+        len(traceable_opens) == len(traceable_spans),
+    )
     for web_evidence_id, evidence_record in evidence_records.items():
-        if (
-            evidence_record.get("source_level") == "web"
-            and not evidence_record.get("source_url")
-        ):
-            add("FAIL", f"Web evidence has no source_url: {web_evidence_id}")
+        if evidence_record.get("source_level") == "web":
+            expect(
+                f"Web evidence has no source_url: {web_evidence_id}",
+                "data_references",
+                bool(evidence_record.get("source_url")),
+            )
     for tag, body in zip(traceable_opens, traceable_spans):
         evidence_id = _attr(tag, "data-evidence-id")
         if evidence_id is None:
             continue
         expected_value = evidence_values.get(evidence_id)
         if expected_value is None:
-            add("FAIL", f"Traceable number references unknown evidence: {evidence_id}")
+            add(
+                "FAIL",
+                f"Traceable number references unknown evidence: {evidence_id}",
+                "data_references",
+            )
             continue
         rendered_value = html_module.unescape(re.sub(r"<[^>]+>", "", body)).strip()
         try:
             actual_number = float(rendered_value)
         except ValueError:
-            add("FAIL", f"Traceable evidence number is not numeric: {evidence_id}")
+            add(
+                "FAIL",
+                f"Traceable evidence number is not numeric: {evidence_id}",
+                "data_references",
+            )
             continue
         try:
             expected_number = float(expected_value)
         except (TypeError, ValueError):
+            add(
+                "FAIL",
+                f"Non-numeric evidence rendered as a number: {evidence_id}",
+                "data_references",
+            )
             continue
         tolerance = max(1e-6, abs(expected_number) * 1e-6)
-        if abs(actual_number - expected_number) > tolerance:
-            add("FAIL", f"Traceable evidence number was tampered: {evidence_id}")
+        expect(
+            f"Traceable evidence number was tampered: {evidence_id}",
+            "data_references",
+            abs(actual_number - expected_number) <= tolerance,
+        )
+
+    # Text/event evidence must be rendered as text, never as a numeric cell.
+    text_items = [
+        item
+        for item in evidence_records.values()
+        if str(item.get("value_type") or infer_value_type(item.get("value"))) != "number"
+        and item.get("value") not in (None, "")
+    ]
+    text_spans = len(re.findall(r'class="[^"]*evidence-text[^"]*"', html))
+    expect(
+        f"Text evidence rendered as numbers: spans {text_spans} != items {len(text_items)}",
+        "data_references",
+        text_spans == len(text_items),
+    )
+
+    # Point-in-time: no evidence may be available after the run's as-of date.
+    if asof:
+        cutoff = str(asof)[:10]
+        late = [
+            str(item.get("evidence_id"))
+            for item in evidence_records.values()
+            if item.get("available_at")
+            and str(item.get("available_at"))[:10] > cutoff
+        ]
+        expect(
+            "Evidence available after as-of: " + ", ".join(late[:5]),
+            "data_references",
+            not late,
+        )
 
     check = validate_decision(
         decision,
@@ -176,19 +284,24 @@ def audit_report(
         asof=asof,
     )
     if not check.ok:
-        add("FAIL", "Decision consistency: " + "; ".join(check.errors))
+        add("FAIL", "Decision consistency: " + "; ".join(check.errors), "decision_text")
     for warning in check.warnings:
-        add("WARN", warning)
+        add("WARN", warning, "decision_text")
 
     fails = [issue for issue in issues if issue["level"] == "FAIL"]
     warns = [issue for issue in issues if issue["level"] == "WARN"]
     return {
         "verdict": "FAIL" if fails else ("WARN" if warns else "PASS"),
-        "score": max(0, 100 - 20 * len(fails) - 8 * len(warns)),
         "issues": issues,
+        "layers": layers,
+        "scope_note": (
+            "程序只校验结构、时点、数值与可计算关系；它不能证明推理正确、"
+            "预测必然实现，也不构成数据供应商完整性保证。"
+        ),
         "tradability_status": check.tradability_status,
         "trade_disclosures": check.disclosures,
         "rule_checks": check.rule_checks,
         "traceable_numbers": len(traceable_tags),
+        "text_evidence": len(text_items),
         "enabled_domains": enabled_domains,
     }

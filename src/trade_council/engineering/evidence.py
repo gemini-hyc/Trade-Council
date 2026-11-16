@@ -5,9 +5,23 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import Field, model_validator
 
 from ..schemas import StrictModel
+
+ValueType = Literal["number", "text", "event", "boolean"]
+
+
+def infer_value_type(value: Any) -> ValueType:
+    """Classify a value so numeric audits never touch free text."""
+
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "text"
 
 
 class EvidenceItem(StrictModel):
@@ -28,6 +42,21 @@ class EvidenceItem(StrictModel):
     source_url: str | None = None
     retrieved_at: str | None = None
     extraction_confidence: str | None = None
+    value_type: ValueType | None = None
+    input_evidence_ids: list[str] = Field(default_factory=list)
+    calc_node: str | None = None
+    period: str | None = None
+    basis: str | None = None
+
+    @model_validator(mode="after")
+    def _fill_value_type(self) -> EvidenceItem:
+        if self.value_type is None:
+            object.__setattr__(self, "value_type", infer_value_type(self.value))
+        return self
+
+    @property
+    def numeric(self) -> bool:
+        return self.value_type == "number"
 
 
 class EvidenceIndex:
@@ -67,7 +96,13 @@ class EvidenceIndex:
         source_url: str | None = None,
         retrieved_at: str | None = None,
         extraction_confidence: str | None = None,
+        value_type: ValueType | None = None,
+        input_evidence_ids: list[str] | None = None,
+        calc_node: str | None = None,
+        period: str | None = None,
+        basis: str | None = None,
     ) -> EvidenceItem:
+        resolved_type = value_type or infer_value_type(value)
         payload = {
             "dataset_id": dataset_id,
             "path": path,
@@ -83,6 +118,7 @@ class EvidenceIndex:
             "source_url": source_url,
             "retrieved_at": retrieved_at,
             "extraction_confidence": extraction_confidence,
+            "value_type": resolved_type,
         }
         slug = dataset_id.replace(".", "-").replace("_", "-")
         evidence_id = f"F-{slug}-{self._digest(payload)}"
@@ -104,6 +140,11 @@ class EvidenceIndex:
             source_url=source_url,
             retrieved_at=retrieved_at,
             extraction_confidence=extraction_confidence,
+            value_type=resolved_type,
+            input_evidence_ids=input_evidence_ids or [],
+            calc_node=calc_node,
+            period=period,
+            basis=basis,
         )
         self._items[evidence_id] = item
         return item

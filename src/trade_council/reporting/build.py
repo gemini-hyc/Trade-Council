@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html as html_module
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,9 @@ from typing import Any
 import pandas as pd
 
 from ..decision.risk_rules import BoardRule, TradeContext, board_rule_for, t_plus_one_blocked
+from ..engineering.evidence import infer_value_type
 from .audit import audit_report
+from .scoring import Scorecard, load_scorecard
 
 DOMAIN_LABELS = {
     "technical": "技术面",
@@ -145,25 +148,40 @@ def _price_svg(datapack_dir: Path) -> tuple[str, int, int]:
     return svg, len(points), refs
 
 
-def _risk_svg(roles: dict[str, dict[str, Any]]) -> str:
-    labels = ["技术", "基本面", "情绪", "风险", "裁决"]
-    values = [3, 3, 3, 3, 3]
-    for index, role_id in enumerate(("market-analyst", "fundamentals-analyst", "sentiment-analyst")):
-        score = roles.get(role_id, {}).get("scores", {})
-        if score:
-            values[index] = min(5, max(1, int(sum(float(v) for v in score.values()) / len(score) / 2)))
-    if "risk-manager" in roles:
-        values[4] = 4
+def _evidence_value_html(item: dict[str, Any]) -> str:
+    """Numbers, text and events are rendered differently and never coerced to 0."""
+
+    value = item.get("value")
+    value_type = str(item.get("value_type") or infer_value_type(value))
+    if value is None or value == "":
+        return "<em>未提供</em>"
+    if value_type == "number":
+        return _format_number(value, str(item.get("evidence_id")))
+    text = html_module.escape(str(value))
+    return f'<span class="evidence-text" data-value-type="text">{text}</span>'
+
+
+def _scorecard_svg(scorecard: Any) -> str:
+    """Render a radar only from explicit, weighted dimensions."""
+
+    computed = scorecard.computed()
+    if computed["status"] == "unavailable":
+        return ""
+    dimensions = [item for item in scorecard.dimensions if item.score is not None]
+    if len(dimensions) < 3:
+        return ""
     points = []
-    for index, value in enumerate(values):
-        angle = -1.5708 + index * 2 * 3.14159 / len(values)
-        radius = 30 + value * 10
-        points.append(f"{100 + radius * __import__('math').cos(angle):.1f},{100 + radius * __import__('math').sin(angle):.1f}")
+    for index, item in enumerate(dimensions):
+        angle = -1.5708 + index * 2 * 3.14159 / len(dimensions)
+        radius = 20 + (float(item.score) / max(scorecard.scale_max, 1e-9)) * 70
+        points.append(
+            f"{100 + radius * math.cos(angle):.1f},{100 + radius * math.sin(angle):.1f}"
+        )
     return (
-        f'<svg data-chart="risk" data-points="{len(labels)}" viewBox="0 0 200 200" '
-        'role="img" aria-label="综合风险雷达">'
-        '<circle cx="100" cy="100" r="80" fill="#eff6ff" stroke="#bfdbfe"/>'
-        f'<polygon points="{" ".join(points)}" fill="#93c5fd" fill-opacity="0.7" stroke="#2563eb"/>'
+        f'<svg data-chart="scorecard" data-points="{len(dimensions)}" viewBox="0 0 200 200" '
+        'role="img" aria-label="评分卡维度">'
+        '<circle cx="100" cy="100" r="90" fill="#f8fafc" stroke="#cbd5e1"/>'
+        f'<polygon points="{" ".join(points)}" fill="#93c5fd" fill-opacity="0.6" stroke="#2563eb"/>'
         "</svg>"
     )
 
@@ -285,6 +303,7 @@ def render_html(
     datapack_dir: Path,
     enabled_domains: list[str],
     market_rules_path: Path,
+    scorecard: Scorecard | None = None,
 ) -> tuple[str, int, int]:
     context = _trade_context_from_run(run)
     board_rule = board_rule_for(
@@ -299,7 +318,7 @@ def render_html(
         str(run.get("asof", "")),
     )
     price_svg, price_points, refs = _price_svg(datapack_dir)
-    risk_svg = _risk_svg(roles)
+    scorecard_html, _scorecard_svg_markup = _render_scorecard(scorecard)
     action = html_module.escape(str(decision.get("action", "INSUFFICIENT_DATA")))
     confidence = html_module.escape(str(decision.get("confidence", "low")))
     risk_level = html_module.escape(str(decision.get("risk_level", "medium")))
@@ -355,9 +374,10 @@ def render_html(
         f"<td><code>{html_module.escape(str(item.get('evidence_id')))}</code></td>"
         f"<td>{html_module.escape(str(item.get('dataset_id')))}</td>"
         f"<td>{html_module.escape(str(item.get('field', '—')))}</td>"
-        f"<td>{_format_number(item.get('value'), str(item.get('evidence_id')))} "
+        f"<td>{_evidence_value_html(item)} "
         f"{html_module.escape(str(item.get('unit', '')))}</td>"
-        f"<td>{html_module.escape(str(item.get('available_at', '—')))}</td>"
+        f"<td>{html_module.escape(str(item.get('value_type') or 'text'))}</td>"
+        f"<td>{html_module.escape(str(item.get('available_at') or '—'))}</td>"
         f"<td>{html_module.escape(str(item.get('source_level', 'local')))}</td>"
         f"<td>{html_module.escape(str(item.get('source_url') or '—'))}</td>"
         "</tr>"
@@ -440,14 +460,53 @@ code{{font-size:11px;overflow-wrap:anywhere}} svg{{max-width:100%;height:auto}} 
 <section class="card"><h2>多空辩论</h2>{debate_html or '<p>当前运行未生成辩论产物</p>'}</section>
 {''.join(domain_sections)}
 {risk_html}
-<section class="card" data-domain="technical"><h2>价格结构</h2>{price_svg}<p class="muted">近60日收盘价；虚线为 MA20/MA60 参考线。RSI 使用 Wilder 主口径，SMA RSI 仅作对照。</p></section>
-<section class="card" data-domain="risk"><h2>风险视图</h2>{risk_svg}</section>
+<section class="card" data-domain="technical"><h2>价格结构</h2>{price_svg}<p class="muted">近60日收盘价（未复权）；虚线为 MA20/MA60 参考线。复权口径用于水平类指标，真实委托价需单独换算。RSI 使用 Wilder 主口径，SMA RSI 仅作对照。</p></section>
+{scorecard_html}
 <section class="card" data-domain="risk"><h2>风控规则命中</h2><ul>{rule_html}</ul></section>
 <section class="card"><h2>数据缺口</h2><ul>{gap_html}</ul></section>
-<section class="card"><h2>证据索引</h2><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>可用时间</th><th>来源层级</th><th>来源链接</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
+<section class="card"><h2>证据索引</h2><table><thead><tr><th>Evidence ID</th><th>数据集</th><th>字段</th><th>值</th><th>类型</th><th>可用时间</th><th>来源层级</th><th>来源链接</th></tr></thead><tbody>{evidence_rows}</tbody></table></section>
 <p class="muted">本报告仅供研究参考，不构成投资建议。</p>
 </main></body></html>"""
     return document, price_points, refs
+
+
+def _render_scorecard(scorecard: Scorecard | None) -> tuple[str, str]:
+    """Build the scorecard section; absence of a definition is stated, not faked."""
+
+    if scorecard is None:
+        return (
+            (
+                '<section class="card" data-scorecard="absent"><h2>评分卡</h2>'
+                "<p>本次运行没有提供带权重、公式与缺失处理的评分卡，"
+                "因此不生成综合评分，也不绘制雷达图。研究结论以结构化判断与证据为准。</p></section>"
+            ),
+            "",
+        )
+    computed = scorecard.computed()
+    rows = "".join(
+        f"<tr><td>{html_module.escape(item.label)}</td>"
+        f"<td>{item.weight:g}</td>"
+        f"<td>{'缺失' if item.score is None else f'{item.score:g}'}</td>"
+        f"<td>{html_module.escape(item.basis)}</td></tr>"
+        for item in scorecard.dimensions
+    )
+    total = (
+        f"{computed['total']:.2f} / {scorecard.scale_max:g}"
+        if computed["total"] is not None
+        else "不可得"
+    )
+    missing = "、".join(computed.get("missing") or []) or "无"
+    svg = _scorecard_svg(scorecard)
+    section = (
+        '<section class="card" data-scorecard="present">'
+        "<h2>评分卡</h2>"
+        f"<p>公式：{html_module.escape(scorecard.formula)}；缺失处理："
+        f"{html_module.escape(scorecard.missing_handling)}；缺失维度：{html_module.escape(missing)}</p>"
+        f"<p>综合分：<strong data-scorecard-total>{html_module.escape(total)}</strong></p>"
+        f"<table><thead><tr><th>维度</th><th>权重</th><th>得分</th><th>依据</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>{svg}</section>"
+    )
+    return section, svg
 
 
 def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
@@ -463,6 +522,7 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
     risk_policy_path = run_dir.parent.parent / "configs" / "risk.yaml"
     market_rules_path = run_dir.parent.parent / "configs" / "market-rules.yaml"
     trade_context = _trade_context_from_run(run)
+    scorecard = load_scorecard(run_dir / "risk_scorecard.json")
     markdown = render_markdown(
         run=run,
         decision=decision,
@@ -478,6 +538,7 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
         datapack_dir=datapack_dir,
         enabled_domains=enabled_domains,
         market_rules_path=market_rules_path,
+        scorecard=scorecard,
     )
     data_gaps = decision.get("data_gaps", [])
     allow_trade = bool(run.get("capability_flags", {}).get("trade_instructions", False))
@@ -495,19 +556,30 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
         asof=str(run.get("asof", "")),
         evidence_items=evidence.get("items", []),
     )
-    (run_dir / "report.md").write_text(markdown, encoding="utf-8")
-    (run_dir / "report.html").write_text(document, encoding="utf-8")
+    passed = audit["verdict"] != "FAIL"
+    # A failing audit may only produce a diagnostic draft. It must never
+    # overwrite a previously passing deliverable or be mistaken for one.
+    suffix = "" if passed else ".draft"
+    (run_dir / f"report{suffix}.md").write_text(markdown, encoding="utf-8")
+    (run_dir / f"report{suffix}.html").write_text(document, encoding="utf-8")
     (run_dir / "audit.json").write_text(
         json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     run.update(
         {
-            "status": "AUDITED",
+            "status": "AUDITED" if passed else "AUDIT_FAILED",
             "updated_at": datetime.now().isoformat(timespec="seconds"),
-            "report": {
-                "markdown": str(run_dir / "report.md"),
-                "html": str(run_dir / "report.html"),
-            },
+            "report": (
+                {
+                    "markdown": str(run_dir / "report.md"),
+                    "html": str(run_dir / "report.html"),
+                }
+                if passed
+                else {
+                    "markdown_draft": str(run_dir / "report.draft.md"),
+                    "html_draft": str(run_dir / "report.draft.html"),
+                }
+            ),
             "audit": audit,
         }
     )

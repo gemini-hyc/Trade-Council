@@ -39,7 +39,8 @@ from ..data.local_quant import LocalQuantProvider
 from ..data.registry import DatasetRegistry
 from .evidence import EvidenceIndex
 from .events import append_event_digest, load_events, write_event_artifacts
-from .indicators import add_indicators, main_net_amount
+from .financials import CALC_RULES_VERSION, build_financial_artifacts
+from .indicators import MA_WINDOWS, add_indicators, ma_alignment, main_net_amount
 
 BASE = Path(os.environ.get("QUANT_DATA", "~/quant-data")).expanduser()
 PROVIDER = LocalQuantProvider(BASE)
@@ -254,6 +255,7 @@ def build(
     name_hint=None,
     include_news: bool = False,
     data_root: Path | None = None,
+    official_metrics_path: Path | None = None,
 ):
     global BASE, PROVIDER, DATA_CONTRACT_PATH, REG
     if data_root is not None:
@@ -443,10 +445,14 @@ def build(
                 REG.get("hsgt_top10")["note"] = "2024-08-19 后 net_amount 字段不可用；仅保留 amount"
 
     # ---------- 6. 财务三表 ----------
+    # 利润表只取原库已有的列；缺列不假设存在，由 DataNeed 补录。
     INC_COLS = ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
                 "basic_eps", "diluted_eps", "total_revenue", "revenue", "oper_cost",
-                "operate_profit", "total_profit", "n_income", "n_income_attr_p",
-                "sell_exp", "admin_exp", "fin_exp", "rd_exp", "assets_impair_loss"]
+                "biz_tax_surchg", "sell_exp", "admin_exp", "rd_exp", "fin_exp",
+                "fv_value_chg_gain", "invest_income", "ass_invest_income",
+                "assets_impair_loss", "operate_profit",
+                "non_oper_income", "non_oper_exp", "total_profit",
+                "income_tax", "n_income", "n_income_attr_p", "minority_gain"]
     BAL_COLS = ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
                 "total_assets", "total_liab", "total_hldr_eqy_exc_min_int",
                 "total_hldr_eqy_inc_min_int", "minority_int", "money_cap",
@@ -499,8 +505,9 @@ def build(
         REG.get(kind)["note"] = "累计口径(YTD)，按公告日过滤；report_type=1 合并报表"
         fin[kind] = d
 
-    # 合并财务宽表
+    # 合并财务宽表（保留原始三表；单季差分改由 financials 模块统一计算）
     fwide = None
+    fin_artifacts: dict[str, Any] = {"status": "unavailable", "reason": "无财务三表输入"}
     try:
         parts = []
         for d in [fin["income"], fin["balancesheet"], fin["cashflow"]]:
@@ -517,19 +524,58 @@ def build(
             for p in parts[1:]:
                 fwide = fwide.merge(p, on="end_date", how="outer", suffixes=("", "_dup"))
             fwide = fwide.drop(columns=[c for c in fwide.columns if c.endswith("_dup")], errors="ignore")
-            if fin["income"] is not None and "available_at" in fin["income"].columns:
-                availability = fin["income"].set_index("end_date")["available_at"]
-                fwide["available_at"] = fwide["end_date"].map(availability)
             fwide = fwide.sort_values("end_date")
-            for c in ("revenue", "n_income_attr_p", "n_cashflow_act"):
-                if c in fwide:
-                    q = fwide[c].diff()
-                    same_year = fwide["end_date"].str[:4] == fwide["end_date"].str[:4].shift(1)
-                    fwide[f"{c}_single_q"] = np.where(same_year, q, fwide[c])
             fwide.to_csv(out_dir / "financials.csv", index=False, encoding="utf-8")
-            REG.add("financials", "财务宽表（三表合并）", "OK", len(fwide),
+            REG.add("financials", "财务宽表（三表原始值）", "OK", len(fwide),
                     f'{fwide["end_date"].iloc[0]} ~ {fwide["end_date"].iloc[-1]}',
-                    "含单季差分列 *_single_q", out_dir / "financials.csv")
+                    "单季差分改由 financials 模块按相邻季度键计算，见 financial_quarters.csv",
+                    out_dir / "financials.csv")
+
+        official_metrics = None
+        if official_metrics_path is not None:
+            try:
+                official_metrics = json.loads(
+                    Path(official_metrics_path).expanduser().read_text(encoding="utf-8")
+                )
+            except Exception as exc:  # noqa: BLE001
+                REG.add("official_metrics", "官方扣非/信用减值补录", "ERROR", 0, "",
+                        f"读取失败：{exc}", str(official_metrics_path))
+        fin_artifacts = build_financial_artifacts(
+            out_dir=out_dir,
+            symbol=ts_code,
+            asof=asof,
+            income=fin["income"],
+            cashflow=fin["cashflow"],
+            balance=fin["balancesheet"],
+            official_metrics=official_metrics,
+        )
+        if fin_artifacts.get("status") == "ok":
+            checks = fin_artifacts["checks_summary"]
+            REG.add(
+                "financial_quarters",
+                "季度财务与盈利桥接",
+                "OK" if checks.get("fail", 0) == 0 else "WARN",
+                len(fin_artifacts["series"].records),
+                f'{fin_artifacts["series"].records[0].end_date} ~ '
+                f'{fin_artifacts["series"].records[-1].end_date}' if fin_artifacts["series"].records else "",
+                f'桥接对账 通过 {checks.get("pass", 0)}，失败 {checks.get("fail", 0)}，'
+                f'不可得 {checks.get("unavailable", 0)}；计算规则 {CALC_RULES_VERSION}',
+                out_dir / "earnings_bridge.json",
+            )
+            official_count = sum(
+                1 for row in fin_artifacts["adjustments"]["periods"]
+                if row.get("official_deducted_parent_net") is not None
+            )
+            REG.add(
+                "official_deducted",
+                "官方扣非归母",
+                "OK" if official_count else "NO_RECORD",
+                official_count,
+                "",
+                "来自公司公告补录；缺失即标缺失，不用未确认字段替代" if not official_count
+                else f"{official_count} 期有官方扣非值",
+                out_dir / "financial_adjustments.json",
+            )
     except Exception as e:  # noqa: BLE001
         REG.add("financials", "财务宽表（三表合并）", "ERROR", 0, "", str(e), "")
 
@@ -864,7 +910,8 @@ def build(
 
     # ---------- 12. DATA_DIGEST.md ----------
     write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc, ind_info,
-                 fresh_gap, af_flag, fc_gap, db, include_news=include_news)
+                 fresh_gap, af_flag, fc_gap, db, include_news=include_news,
+                 fin_artifacts=fin_artifacts)
 
     # ---------- 13. manifest.json ----------
     source_fingerprints = []
@@ -1052,7 +1099,7 @@ def build(
     if fwide is not None and len(fwide):
         financial_row = fwide.iloc[-1]
         financial_date = str(financial_row["end_date"])
-        financial_available = str(financial_row["available_at"])
+        financial_available = str(financial_row.get("available_at", f"{asof} 23:59:59"))
         for field, unit in (
             ("revenue", "CNY"),
             ("n_income_attr_p", "CNY"),
@@ -1070,7 +1117,64 @@ def build(
                     unit=unit,
                     formula="report_type=1; YTD; filtered by ann_date/f_ann_date",
                     source_hash=snapshot_id,
+                    period=f"YTD to {financial_date}",
+                    basis="cumulative_ytd",
+                    value_type="number",
                 )
+
+    # 季度单季证据：只登记可得的单季值，并写明推导状态与可得时间。
+    if fin_artifacts.get("status") == "ok":
+        series = fin_artifacts["series"]
+        for record in series.records[-6:]:
+            for field in ("revenue", "oper_cost", "n_income_attr_p", "total_profit", "assets_impair_loss"):
+                cell = record.values.get(field)
+                if cell is None or cell.status != "ok" or cell.single is None:
+                    continue
+                evidence.add(
+                    dataset_id="financial.quarters",
+                    path="financial_quarters.csv",
+                    primary_key=ts_code,
+                    event_date=record.end_date,
+                    available_at=record.available_at or f"{asof} 23:59:59",
+                    field=f"{field}_single_q",
+                    value=float(cell.single),
+                    unit="CNY",
+                    formula=(
+                        "Q1 单季=Q1 累计；其余=本期累计−同年度上一季累计"
+                        f"（前驱 {cell.predecessor or '—'}）"
+                    ),
+                    source_hash=snapshot_id,
+                    calc_node="financials.quarterize",
+                    period=f"{record.year}Q{record.quarter}",
+                    basis="single_quarter",
+                    value_type="number",
+                    note="单季推导值；不是原披露累计数",
+                )
+        adv = fin_artifacts.get("adjustments", {})
+        available_by_end = {
+            record.end_date: record.available_at for record in series.records
+        }
+        for row in adv.get("periods", []):
+            if row.get("official_deducted_parent_net") is None:
+                continue
+            evidence.add(
+                dataset_id="financial.official",
+                path="financial_adjustments.json",
+                primary_key=ts_code,
+                event_date=row["end_date"],
+                available_at=available_by_end.get(row["end_date"]) or f"{asof} 23:59:59",
+                field="official_deducted_parent_net",
+                value=float(row["official_deducted_parent_net"]),
+                unit="CNY",
+                formula="公司公告披露的扣除非经常性损益后的归母净利润（累计口径，需按季差分）",
+                source_hash=snapshot_id,
+                source_level="web",
+                source_url=row.get("official_source_url"),
+                value_type="number",
+                period=f"YTD to {row['end_date']}",
+                basis="official_deducted_cumulative",
+                note=str(row.get("official_location") or ""),
+            )
 
     for event in event_payload["events"]:
         event["snapshot_id"] = snapshot_id
@@ -1114,6 +1218,22 @@ def build(
         generated_at=datetime.now().isoformat(timespec="seconds"),
         quant_data=str(BASE), years=years,
         adj_base_factor=float(px["adj_factor"].iloc[-1]),
+        price_basis={
+            "close": "raw_unadjusted",
+            "adj_close": "qfq_base_asof",
+            "adj_formula": "adj_close = close * adj_factor[t] / adj_factor[asof]",
+            "adj_base_date": asof,
+            "note": ("复权价只用于均线、ATR、支撑压力等水平类指标；"
+                     "真实委托价必须用未复权价，两者不可混入同一收益路径"),
+        },
+        calc_rules_version=CALC_RULES_VERSION,
+        financial_artifacts={
+            "quarters": "financial_quarters.csv" if (out_dir / "financial_quarters.csv").exists() else None,
+            "bridge": "earnings_bridge.json" if (out_dir / "earnings_bridge.json").exists() else None,
+            "adjustments": ("financial_adjustments.json"
+                            if (out_dir / "financial_adjustments.json").exists() else None),
+            "checks_summary": fin_artifacts.get("checks_summary"),
+        },
         bars=len(px), datasets=REG.items,
         files=sorted(p.name for p in out_dir.glob("*") if p.is_file()),
     )
@@ -1154,7 +1274,8 @@ def pct(v, nd=2):
 
 
 def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
-                 ind_info, fresh_gap, af_flag, fc_gap=None, db=None, include_news=False):
+                 ind_info, fresh_gap, af_flag, fc_gap=None, db=None, include_news=False,
+                 fin_artifacts=None):
     L: list[str] = []
     A = L.append
     A(f"# 数据摘要 · {stock_name}（{ts_code}）")
@@ -1186,8 +1307,11 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
           f"{it['span'] or '—'} | {note} |")
     A("")
 
-    # —— 最新快照 ——
     A("## 2. 最新交易日快照")
+    A("")
+    A("> **价格口径**：`收盘（未复权）` 是原始成交价，用于真实委托价格；"
+      "`复权收盘` 是前复权价（基准日 = 本次 asof），只用于均线、ATR、支撑压力等水平类指标。"
+      "两种口径不可相减、不可混在同一收益路径里。")
     A("")
     A("| 字段 | 值 | 字段 | 值 |")
     A("|---|---|---|---|")
@@ -1243,8 +1367,10 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
         A("_无估值数据（daily_basic 无该标的记录）_")
     A("")
 
-    # —— 均线体系 ——
     A("## 4. 均线体系（基于复权价）")
+    A("")
+    A("> 表中与下文所有均线数值均为**前复权价**（基准日 = 本次 asof），"
+      "不等于当日可成交的原始价格。")
     A("")
     A("| 均线 | 数值 | 现价距离 | 均线 | 数值 | 现价距离 |")
     A("|---|---|---|---|---|---|")
@@ -1257,19 +1383,17 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
         db = pct(last.get(f"dist_{b}")) if b.startswith("ma") else pct(last["adj_close"] / last[b] - 1)
         A(f"| {lname} | {fmt(last.get(a))} | {da} | {rname} | {fmt(last.get(b))} | {db} |")
     A("")
-    arr = [last.get(f"ma{n}") for n in (5, 10, 20, 30, 60, 120, 250)]
-    if all(pd.notna(x) for x in arr):
-        short = arr[:3]
-        mid = arr[2:6]
-        if arr == sorted(arr):
-            shape = "**完全多头排列**（MA5>MA10>MA20>MA30>MA60>MA120>MA250）"
-        elif arr == sorted(arr, reverse=True):
-            shape = "**完全空头排列**（MA5<MA10<MA20<MA30<MA60<MA120<MA250）"
-        else:
-            s_txt = "短期多头" if short == sorted(short) else ("短期空头" if short == sorted(short, reverse=True) else "短期纠缠")
-            m_txt = "中期多头" if mid == sorted(mid) else ("中期空头" if mid == sorted(mid, reverse=True) else "中期纠缠")
-            shape = f"非单边结构 —— {s_txt}、{m_txt}（MA5/10/20 = {arr[0]:.2f}/{arr[1]:.2f}/{arr[2]:.2f}）"
-        A(f"排列判定：{shape}")
+    arr = [last.get(f"ma{n}") for n in MA_WINDOWS]
+    alignment = ma_alignment(arr)
+    short_alignment = ma_alignment(arr[:3], MA_WINDOWS[:3], name="短期均线")
+    mid_alignment = ma_alignment(arr[2:6], MA_WINDOWS[2:6], name="中期均线")
+    A("均线排列判定（**逐对相邻严格比较**，相等或缺值不做方向推断）：")
+    A("")
+    A(f"- 全序列：**{alignment.label}**。{alignment.detail}")
+    A(f"- 短期（MA5/MA10/MA20）：{short_alignment.label}。{short_alignment.detail}")
+    A(f"- 中期（MA20/MA30/MA60/MA120）：{mid_alignment.label}。{mid_alignment.detail}")
+    if alignment.state == "undetermined":
+        A("- 说明：样本不足时（如上市未满 250 个交易日）不得声称“完全多头/空头排列”。")
     A("")
     A(f"- 250日最高（复权）{fmt(last['high_250'])}，最低 {fmt(last['low_250'])}，"
       f"当前距250日高点 {pct(last['drawdown_from_250h'])}")
@@ -1353,46 +1477,109 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
     A("")
 
     # —— 财务 ——
-    A("## 8. 财务摘要（累计口径 YTD）")
+    A("## 8. 财务摘要（报表 / 单季 / 官方扣非 / 调整情景）")
     A("")
-    if fwide is not None and len(fwide):
-        show = fwide.tail(8)
-        A("| 报告期 | 营收(亿) | 归母净利(亿) | 营收单季(亿) | 净利单季(亿) | 毛利率 | 净利率(单季) | ROE(年化) | 资产负债率 | 经营现金流(亿) |")
-        A("|---|---|---|---|---|---|---|---|---|---|")
-        for _, r in show.iterrows():
-            rev = r.get("revenue")
-            ni = r.get("n_income_attr_p")
-            cost = r.get("oper_cost")
-            gm = (rev - cost) / rev if pd.notna(rev) and pd.notna(cost) and rev else np.nan
-            qrev = r.get("revenue_single_q")
-            qni = r.get("n_income_attr_p_single_q")
-            nm = qni / qrev if pd.notna(qni) and pd.notna(qrev) and qrev else np.nan
-            ta, tl = r.get("total_assets"), r.get("total_liab")
-            lev = tl / ta if pd.notna(ta) and pd.notna(tl) and ta else np.nan
-            eq = r.get("total_hldr_eqy_exc_min_int")
-            mm = int(str(r["end_date"])[4:6])
-            roe = ni / eq * (12 / mm) if pd.notna(ni) and pd.notna(eq) and eq and mm else np.nan
-            A(f"| {r['end_date']} | {fmt(rev/1e8) if pd.notna(rev) else '—'} | "
-              f"{fmt(ni/1e8) if pd.notna(ni) else '—'} | "
-              f"{fmt(qrev/1e8) if pd.notna(qrev) else '—'} | "
-              f"{fmt(qni/1e8) if pd.notna(qni) else '—'} | "
-              f"{pct(gm) if pd.notna(gm) else '—'} | {pct(nm) if pd.notna(nm) else '—'} | "
-              f"{pct(roe) if pd.notna(roe) else '—'} | "
-              f"{pct(lev) if pd.notna(lev) else '—'} | "
-              f"{fmt(r.get('n_cashflow_act')/1e8) if pd.notna(r.get('n_cashflow_act', np.nan)) else '—'} |")
+    A("> 四类数字必须分开引用：**报表值**是原披露累计数；**单季值**由同年度相邻累计数相减；"
+      "**官方扣非归母**来自公司公告；**分析调整情景**是本模块按明确假设算出的核对值，"
+      "不等于公司真实可持续盈利。")
+    A("")
+    if fin_artifacts and fin_artifacts.get("status") == "ok":
+        series = fin_artifacts["series"]
+        records = series.records[-8:]
+        lev_by_end = {}
+        if fwide is not None and len(fwide):
+            for _, r in fwide.iterrows():
+                ta, tl = r.get("total_assets"), r.get("total_liab")
+                if pd.notna(ta) and pd.notna(tl) and ta:
+                    lev_by_end[str(r["end_date"])] = tl / ta
+        A("| 报告期 | 单季营收(亿) | 单季归母(亿) | 单季毛利率 | 单季归母净利率 | "
+          "ROE估算(简单年化) | 资产负债率(期末) | 单季经营现金流(亿) | 季度状态 |")
+        A("|---|---|---|---|---|---|---|---|---|")
+        for rec in records:
+            def qv(field):
+                cell = rec.values.get(field)
+                return cell.single if cell is not None and cell.status == "ok" else None
+
+            qrev, qni = qv("revenue"), qv("n_income_attr_p")
+            qgp = (qrev - qv("oper_cost")) if (qrev is not None and qv("oper_cost") is not None) else None
+            gm = qgp / qrev if qgp is not None and qrev else None
+            nm = qni / qrev if qni is not None and qrev else None
+            eq_cell = rec.values.get("total_hldr_eqy_exc_min_int")
+            eq = eq_cell.cumulative if eq_cell is not None else None
+            roe_est = qni / eq * (12 / (rec.quarter * 3)) if (qni is not None and eq) else None
+            lev = lev_by_end.get(rec.end_date)
+            cash = qv("n_cashflow_act")
+            status = "正常" if rec.status == "ok" else f"{rec.status}：{rec.reason}"
+            A(f"| {rec.end_date} | {fmt(qrev/1e8) if qrev is not None else '—'} | "
+              f"{fmt(qni/1e8) if qni is not None else '—'} | "
+              f"{pct(gm) if gm is not None else '—'} | {pct(nm) if nm is not None else '—'} | "
+              f"{pct(roe_est) if roe_est is not None else '—'} | "
+              f"{pct(lev) if lev is not None else '—'} | "
+              f"{fmt(cash/1e8) if cash is not None else '—'} | {status} |")
         A("")
-        lr = fwide.iloc[-1]
-        A("**最新期关键项**：")
-        for k, lab, unit in (("money_cap", "货币资金", "亿"), ("accounts_receiv", "应收账款", "亿"),
-                             ("notes_receiv", "应收票据", "亿"), ("inventories", "存货", "亿"),
-                             ("goodwill", "商誉", "亿"), ("fix_assets", "固定资产", "亿"),
-                             ("cip", "在建工程", "亿"), ("st_borr", "短期借款", "亿"),
-                             ("lt_borr", "长期借款", "亿"), ("bond_payable", "应付债券", "亿")):
-            if k in lr and pd.notna(lr[k]):
-                A(f"- {lab}：{fmt(lr[k]/1e8)} {unit}")
-        if pd.notna(lr.get("n_cashflow_act")) and pd.notna(lr.get("n_income_attr_p")) and lr["n_income_attr_p"]:
-            A(f"- 净利现金含量（经营现金流/归母净利）：{fmt(lr['n_cashflow_act']/lr['n_income_attr_p']*100)}%"
-              f"　>100% 为健康，长期为负说明利润沉淀在应收/存货")
+        A("**口径定义（可直接复算）：**")
+        A("")
+        A("- 单季营收 = 本期累计营业收入 − 上一季累计营业收入；Q1 单季 = Q1 累计。")
+        A("- 单季毛利率 = (单季营业收入 − 单季营业成本) ÷ 单季营业收入。")
+        A("- 单季归母净利率 = 单季归母净利润 ÷ 单季营业收入。")
+        A("- **期末净资产口径简单年化 ROE 估算** = 单季归母净利润 ÷ 期末归母净资产 "
+          "× (12 ÷ 报告期月数)。这是估算，**不是公司披露的加权平均净资产收益率**；"
+          "官方加权 ROE 必须单列来源与期间，不能用 PB/PE 隐含比值代替。")
+        A("- 资产负债率 = 期末负债总额 ÷ 期末资产总额（时点存量，不做单季差分）。")
+        A("")
+
+        adv = fin_artifacts.get("adjustments", {})
+        rows = [row for row in adv.get("periods", []) if row.get("reported_parent_net") is not None][-8:]
+        if rows:
+            A("**三类盈利分列（单位：亿元）**")
+            A("")
+            A("| 报告期 | 报表归母 | 官方扣非归母 | 调整情景：仅剔资产减值 | 调整情景：再剔信用减值 |")
+            A("|---|---|---|---|---|")
+            for row in rows:
+                def amt(key):
+                    value = row.get(key)
+                    return fmt(value / 1e8) if value is not None else "缺失"
+
+                A(f"| {row['end_date']} | {amt('reported_parent_net')} | "
+                  f"{amt('official_deducted_parent_net')} | "
+                  f"{amt('adjusted_parent_net_strip_asset')} | "
+                  f"{amt('adjusted_parent_net_strip_asset_and_credit')} |")
+            A("")
+            scenario = adv.get("scenario", {})
+            A(f"- 调整情景公式：{scenario.get('formula', '—')}")
+            A(f"- 情景假设：{'；'.join(scenario.get('assumptions', []))}")
+            A("- **调整后单季利润不得乘 4 当作可持续年利润**；它只是这次核对口径下的一个情景。")
+            A("")
+
+        cash_note = fin_artifacts["series"].records[-1] if fin_artifacts["series"].records else None
+        if cash_note is not None:
+            cell_cash = cash_note.values.get("n_cashflow_act")
+            cell_net = cash_note.values.get("n_income")
+            cell_parent = cash_note.values.get("n_income_attr_p")
+            if (cell_cash is not None and cell_cash.single is not None
+                    and cell_net is not None and cell_net.single not in (None, 0)):
+                A(f"- 经营现金流/合并净利润（最新单季，同口径）= "
+                  f"{fmt(cell_cash.single / cell_net.single * 100)}%；"
+                  "分子分母同为合并口径，可作一致性指标，但单一季度比值不构成“健康”结论。")
+            if (cell_cash is not None and cell_cash.single is not None
+                    and cell_parent is not None and cell_parent.single not in (None, 0)):
+                A(f"- 经营现金流/归母净利润（最新单季）= "
+                  f"{fmt(cell_cash.single / cell_parent.single * 100)}%；"
+                  "分母不含少数股东损益，与分子口径不匹配，仅作参考。")
+        A("")
+        lr = fwide.iloc[-1] if fwide is not None and len(fwide) else None
+        if lr is not None:
+            A("**最新期关键项（期末时点值）**：")
+            for k, lab, unit in (("money_cap", "货币资金", "亿"), ("accounts_receiv", "应收账款", "亿"),
+                                 ("notes_receiv", "应收票据", "亿"), ("inventories", "存货", "亿"),
+                                 ("goodwill", "商誉", "亿"), ("fix_assets", "固定资产", "亿"),
+                                 ("cip", "在建工程", "亿"), ("st_borr", "短期借款", "亿"),
+                                 ("lt_borr", "长期借款", "亿"), ("bond_payable", "应付债券", "亿")):
+                if k in lr and pd.notna(lr[k]):
+                    A(f"- {lab}：{fmt(lr[k]/1e8)} {unit}")
+        A("")
+    elif fwide is not None and len(fwide):
+        A("_财务原表可用，但季度拆分不可得；原因见 financial_quarters.csv 的 quarter_status 列。_")
         A("")
     else:
         A("_财务三表均无该标的记录，基本面分析必须走 Level 2/3 补齐。_")
@@ -1524,11 +1711,18 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
               else "本地无命中，必须 Level 3 核实")
     checklist = [
         f"行情 {REG.status_of('price')}：{len(px)} 根K线。支撑/压力/止损/ATR/前高前低是否**全部**用复权价？",
-        f"复权 {'异常' if af_flag else 'OK'}：报告中价格水平类指标与复权口径是否一致？混用未复权价会系统性偏移。",
+        f"复权 {'异常' if af_flag else 'OK'}：报告中价格水平类指标与复权口径是否一致？混用未复权价会系统性偏移。"
+        "复权价是前复权（基准日=" + asof + "），真实委托价要单独换算。",
+        "均线排列：是否按“相邻严格不等”判断？出现相等值或缺值时应写混合/不可判，"
+        "不得用排序结果代替严格不等式。",
         f"业绩预告 {fc_status}：{fc_txt}。"
         + ("**距基准日超过 120 天，必须先 Level 3 核实是否已有新预告，再动笔。**"
            if (fc_gap or 0) > 120 else ""),
-        f"财务三表 {REG.status_of('financials')}：单季已做差；净利现金含量是否检查？应收/存货/商誉是否触及？",
+        f"财务三表 {REG.status_of('financials')}：单季值是否取自 financial_quarters.csv，"
+        "且 quarter_status 为 ok？缺上一季时是否明确写“单季不可得”，而不是倒推？",
+        "盈利口径：报表归母、官方扣非、调整情景是否分列？调整情景是否写明税率、"
+        "少数股东处理与“不是可持续年利润”？",
+        "ROE：是否写的是“期末净资产口径简单年化估算”，而不是公司披露的加权平均 ROE？",
         f"估值分位：PE/PB/PS 是否给出**历史分位**而非仅绝对值？分位区间是否与结论匹配？",
         f"资金 {REG.status_of('moneyflow')}：当日主力净额是否拆到超大单/大单？net_mf_amount 与主力净额是否混用？",
         f"两融 {REG.status_of('margin_detail')}：T+1 发布，最新日期 {REG.get('margin_detail')['span'].split('~')[-1].strip() if REG.get('margin_detail') else '—'}，"

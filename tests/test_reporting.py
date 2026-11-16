@@ -337,7 +337,11 @@ def test_report_gate_detects_empty_chart(tmp_path: Path) -> None:
     project, run_dir, datapack = _make_project_and_run(tmp_path)
     build_report(run_dir, datapack)
     document = (run_dir / "report.html").read_text(encoding="utf-8")
-    mutated = document.replace('data-chart="risk" data-points="5"', 'data-chart="risk" data-points="0"')
+    # 固定风险雷达已删除（不再有 data-chart="risk"），改由价格图承担图元检查。
+    mutated = document.replace(
+        'data-chart="price" data-points="10"', 'data-chart="price" data-points="0"'
+    )
+    assert mutated != document
     roles = {}
     for path in (run_dir / "agents").glob("phase*/*.json"):
         roles[path.stem] = json.loads(path.read_text(encoding="utf-8"))
@@ -386,11 +390,15 @@ def test_report_displays_trade_context_and_t_plus_one_failure(tmp_path: Path) ->
     }
     (run_dir / "decision.json").write_text(json.dumps(decision), encoding="utf-8")
     audit = build_report(run_dir, datapack)
-    html = (run_dir / "report.html").read_text(encoding="utf-8")
+    # 审计 FAIL 时只能产出诊断草稿，不得覆盖/生成正式交付物。
+    assert not (run_dir / "report.html").exists()
+    html = (run_dir / "report.draft.html").read_text(encoding="utf-8")
     assert 'data-decision-field="position_shares"' in html
     assert "T+1 状态" in html
     assert audit["verdict"] == "FAIL"
     assert any("T+1" in issue["message"] for issue in audit["issues"])
+    state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert state["status"] == "AUDIT_FAILED"
 
 
 def test_report_gate_detects_decision_and_evidence_tampering(tmp_path: Path) -> None:
