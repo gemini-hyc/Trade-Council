@@ -16,8 +16,11 @@ from typing import Any, cast
 import pandas as pd
 
 from ..config import ProjectConfig
+from ..decision.risk_rules import tradability_status
 from ..engineering.financials import INCOME_FLOW_FIELDS, FinancialDataError, quarterize
 from ..reporting.build import build_report
+from ..research.gaps import GAP_LABELS, GapRecord
+from ..research.propagation import load_revisions
 from ..schemas import DecisionPlan, FinalDecision, RoleOutput, TradeProposal
 from .current_agent import verify_input_binding
 
@@ -27,7 +30,17 @@ ROLE_MODELS: dict[str, type[Any]] = {
     "risk-manager": FinalDecision,
 }
 RESEARCH_ARTIFACTS = ("research_questions.json", "claims.json", "research_decision.json")
-READY_STATUSES = {"AWAITING_CURRENT_AGENT", "DATA_READY", "DECIDED", "VALIDATED", "FINALIZED", "AUDITED"}
+GAP_FILE = "data_gaps.json"
+READY_STATUSES = {
+    "AWAITING_CURRENT_AGENT",
+    "DATA_READY",
+    "DECIDED",
+    "VALIDATED",
+    "VALIDATION_FAILED",
+    "FINALIZED",
+    "AUDITED",
+    "AUDIT_FAILED",
+}
 
 
 @dataclass
@@ -326,6 +339,158 @@ def _validate_research(
     return research, claims
 
 
+def _validate_gaps(report: ValidationReport, run_dir: Path, research: dict[str, Any]) -> None:
+    """Gap classes must be honest and must limit the conclusions they affect."""
+
+    path = run_dir / GAP_FILE
+    if not path.is_file():
+        return
+    payload = _read_json(path)
+    items = payload.get("gaps", payload) if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        report.fail("RESEARCH_SCHEMA_INVALID", "data_gaps.json 必须是缺口数组", str(path))
+        return
+    execution = research.get("execution") or {}
+    for raw in items:
+        if not isinstance(raw, dict):
+            report.fail("RESEARCH_SCHEMA_INVALID", "缺口记录必须是对象", str(path))
+            continue
+        try:
+            gap = GapRecord.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            report.fail("RESEARCH_SCHEMA_INVALID", f"缺口记录不合规：{exc}", str(path))
+            continue
+        if gap.priority != "critical":
+            continue
+        for dimension in gap.affects:
+            if dimension in {"fundamental", "valuation", "timing"}:
+                claimed = str(research.get(f"{dimension}_assessment") or "unresolved")
+                if claimed != "unresolved":
+                    report.fail(
+                        "CRITICAL_GAP_NOT_REFLECTED",
+                        f"关键缺口 {gap.gap_id}（{GAP_LABELS.get(gap.kind, gap.kind)}）仍影响"
+                        f"{dimension}判断，但该维度已给出结论 {claimed}；必须改为 unresolved "
+                        "或先补上证据",
+                        str(path),
+                    )
+            if dimension == "execution" and execution.get("status") == "actionable":
+                report.fail(
+                    "CRITICAL_GAP_BLOCKS_EXECUTION",
+                    f"关键缺口 {gap.gap_id} 影响可执行条件，但 execution 仍标为 actionable",
+                    str(path),
+                )
+
+
+def _validate_revisions(report: ValidationReport, run_dir: Path, run: dict[str, Any]) -> list[str]:
+    """Unreviewed revisions keep their downstream outputs blocked."""
+
+    records = load_revisions(run_dir)
+    for record in records:
+        if record.get("revision_id") == "invalid":
+            report.fail(
+                "RESEARCH_SCHEMA_INVALID",
+                f"revisions.jsonl 存在无法解析的行：{record.get('raw', '')[:80]}",
+                str(run_dir / "revisions.jsonl"),
+            )
+    pending = [str(item) for item in (run.get("revision_state") or {}).get("pending_review_outputs") or []]
+    if pending:
+        report.warn(
+            "REVISION_PENDING_REVIEW",
+            f"修订后仍有输出未复核：{', '.join(pending)}",
+            str(run_dir / "revisions.jsonl"),
+        )
+    return pending
+
+
+def _validate_execution(
+    report: ValidationReport,
+    run: dict[str, Any],
+    research: dict[str, Any],
+    decision: dict[str, Any],
+    datapack: Path,
+    pending_reviews: list[str],
+) -> None:
+    """Keep the account action honest: no size without inputs, no sell without stock."""
+
+    execution = research.get("execution") or {}
+    status = str(execution.get("status") or "not_assessed")
+    target = execution.get("target_account_weight")
+    sell_fraction = execution.get("sell_fraction_of_current")
+    cash_amount = execution.get("cash_amount")
+    action = str(decision.get("action") or "")
+    context = run.get("trade_context") or {}
+
+    for label, value in (
+        ("target_account_weight", target),
+        ("sell_fraction_of_current", sell_fraction),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, (int, float)):
+            report.fail("EXECUTION_SIZE_INVALID", f"{label} 不是数字：{value!r}", str(run.get("run_dir", "")))
+            continue
+        if value <= 0 or value > 1:
+            report.fail(
+                "EXECUTION_SIZE_INVALID",
+                f"{label}={value} 必须落在 0~1（占总资产比例），超过 1 等于超过全部资金",
+                str(run.get("run_dir", "")),
+            )
+    if cash_amount is not None and not isinstance(cash_amount, (int, float)):
+        report.fail("EXECUTION_SIZE_INVALID", f"cash_amount 不是数字：{cash_amount!r}")
+
+    if status != "actionable":
+        return
+    if action not in {"BUY", "SELL"}:
+        report.fail(
+            "EXECUTION_WITHOUT_ACTION",
+            f"execution_status=actionable 但 decision.action={action or '缺失'}；"
+            "没有买卖动作就没有可执行仓位",
+            str(run.get("run_dir", "")),
+        )
+    if target is None and sell_fraction is None and cash_amount is None:
+        report.fail(
+            "EXECUTION_WITHOUT_SIZE",
+            "execution_status=actionable 但没有 target_account_weight / "
+            "sell_fraction_of_current / cash_amount",
+            str(run.get("run_dir", "")),
+        )
+    if action == "SELL" and str(context.get("position_state") or "") != "holding":
+        report.fail(
+            "SELL_WITHOUT_POSITION",
+            "公司研究给出卖出动作，但账户没有持仓可卖；这只能是“不建议买入/继续观察”，"
+            "不能写成卖出指令",
+            str(run.get("run_dir", "")),
+        )
+    if pending_reviews:
+        report.fail(
+            "EXECUTION_BEFORE_REVIEW",
+            f"修订后的输出尚未复核（{', '.join(pending_reviews)}），不能标为可执行",
+            str(run.get("run_dir", "")),
+        )
+    if datapack.is_dir() and tradability_status(datapack) == "unknown":
+        report.fail(
+            "TRADE_STATE_UNKNOWN",
+            "无法确认该标的当日可交易状态（停牌/涨跌停/无行情），不能标为可执行",
+            str(datapack),
+        )
+
+
+def _validate_valuation(report: ValidationReport, research: dict[str, Any]) -> None:
+    reference = research.get("valuation_reference")
+    if not isinstance(reference, dict):
+        return
+    method = str(reference.get("method") or "none")
+    if method == "historical_median_multiple":
+        required = ("window_start", "window_end", "sample_size", "percentile_definition")
+        missing = [name for name in required if reference.get(name) in (None, "")]
+        if missing:
+            report.fail(
+                "VALUATION_PERCENTILE_UNDEFINED",
+                "历史分位估值缺少窗口起止/样本数/分位定义：" + "、".join(missing),
+                str(report.run_id),
+            )
+
+
 def validate_run(config: ProjectConfig, run_id: str) -> ValidationReport:
     """Check a run without calling a model and without marking it complete."""
 
@@ -377,6 +542,10 @@ def validate_run(config: ProjectConfig, run_id: str) -> ValidationReport:
             report.fail("DECISION_SCHEMA_INVALID", f"decision.json 不符合 Schema：{exc}", str(decision_path))
 
     research, claims = _validate_research(report, run_dir, decision)
+    _validate_gaps(report, run_dir, research)
+    _validate_valuation(report, research)
+    pending_reviews = _validate_revisions(report, run_dir, run)
+    _validate_execution(report, run, research, decision, datapack, pending_reviews)
 
     evidence = load_evidence_universe(datapack, run_dir)
     report.evidence_count = len(evidence)

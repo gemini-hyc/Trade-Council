@@ -39,10 +39,23 @@ from .orchestration.current_agent import prepare_current_agent_task
 from .orchestration.finalization import finalize_run, load_finalization, validate_run
 from .orchestration.workflow import WorkflowEngine
 from .reporting.build import build_report
+from .research.evidence_import import import_evidence
+from .research.propagation import record_revision
 
 
 def _project_root(value: str) -> Path:
     return Path(value).expanduser().resolve()
+
+
+def _run_dir(config: ProjectConfig, run_id: str) -> Path:
+    return config.root / config.app.run_dir / run_id
+
+
+def _read_run(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "run.json"
+    if not path.is_file():
+        raise TradeCouncilError(f"运行不存在或缺少 run.json：{run_dir}")
+    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -176,6 +189,29 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--out-dir", default=None)
     export_parser.add_argument("--root", default=".", type=_project_root)
     export_parser.set_defaults(handler=_export)
+
+    research_parser = subparsers.add_parser(
+        "research", help="Import supplementary evidence and record claim revisions."
+    )
+    research_sub = research_parser.add_subparsers(dest="research_command")
+    import_parser = research_sub.add_parser(
+        "import-evidence",
+        help="Validate and store evidence the current agent found outside the data pack.",
+    )
+    import_parser.add_argument("--run-id", required=True)
+    import_parser.add_argument("--file", required=True, type=Path)
+    import_parser.add_argument("--root", default=".", type=_project_root)
+    import_parser.add_argument("--json", action="store_true")
+    import_parser.set_defaults(handler=_research_import)
+
+    revise_parser = research_sub.add_parser(
+        "revise", help="Record a claim revision and propagate its invalidation."
+    )
+    revise_parser.add_argument("--run-id", required=True)
+    revise_parser.add_argument("--file", required=True, type=Path)
+    revise_parser.add_argument("--root", default=".", type=_project_root)
+    revise_parser.add_argument("--json", action="store_true")
+    revise_parser.set_defaults(handler=_research_revise)
 
     return parser
 
@@ -643,6 +679,48 @@ def _finalize(args: argparse.Namespace) -> int:
                 if issue.get("level") == "FAIL":
                     print(f"  [FAIL] {issue['message']}")
     return 0 if record["ok"] else 1
+
+
+def _research_import(args: argparse.Namespace) -> int:
+    config = load_project_config(args.root)
+    run_dir = _run_dir(config, args.run_id)
+    run = _read_run(run_dir)
+    payload = json.loads(args.file.expanduser().read_text(encoding="utf-8"))
+    result = import_evidence(
+        run_dir,
+        payload,
+        symbol=str(run.get("symbol") or ""),
+        asof=str(run.get("asof") or "")[:10],
+        source_label=str(args.file),
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"run {args.run_id}: 新增 {len(result.added)} 条，"
+              f"重复 {len(result.duplicates)} 条，拒绝 {len(result.rejected)} 条")
+        for evidence_id in result.added:
+            print(f"  + {evidence_id}")
+        for item in result.rejected:
+            print(f"  ! {item.get('dataset_id', '')}: {item.get('reason')}")
+    return 0 if not result.rejected else 2
+
+
+def _research_revise(args: argparse.Namespace) -> int:
+    config = load_project_config(args.root)
+    run_dir = _run_dir(config, args.run_id)
+    payload = json.loads(args.file.expanduser().read_text(encoding="utf-8"))
+    outcome = record_revision(run_dir, payload)
+    if args.json:
+        print(json.dumps(outcome, ensure_ascii=False, indent=2))
+    else:
+        record = outcome["record"]
+        print(f"run {args.run_id}: 已记录修订 {record['revision_id']}")
+        print(f"  受影响论点：{', '.join(record['affected_claim_ids']) or '无'}")
+        if outcome["propagated_claim_ids"]:
+            print(f"  失效传播到：{', '.join(outcome['propagated_claim_ids'])}")
+        pending = outcome["run_state"].get("pending_review_outputs") or []
+        print(f"  待复核输出：{', '.join(pending) if pending else '无'}")
+    return 0
 
 
 def _runs_list(args: argparse.Namespace) -> int:
