@@ -78,6 +78,11 @@ BALANCE_STOCK_FIELDS: tuple[str, ...] = (
 )
 
 QUARTER_BY_MMDD = {"0331": 1, "0630": 2, "0930": 3, "1231": 4}
+MMDD_BY_QUARTER = {value: key for key, value in QUARTER_BY_MMDD.items()}
+
+
+def _quarter_end(quarter: int) -> str:
+    return MMDD_BY_QUARTER[quarter]
 
 #: Absolute tolerance in CNY. Local statements are reported to the yuan, so a
 #: one-yuan difference is a real difference; display rounding must not hide it.
@@ -932,20 +937,58 @@ def build_adjustments(
 
     tax_rate = DEFAULT_ADJUSTMENT_TAX_RATE
     official = (official_metrics or {}).get("periods", {})
+
+    def _official_single(field_name: str) -> dict[str, float | None]:
+        """Difference an official cumulative figure inside the same fiscal year."""
+
+        cumulative: dict[str, float | None] = {
+            end_date: _number((official.get(end_date) or {}).get(field_name))
+            for end_date in official
+        }
+        single: dict[str, float | None] = {}
+        for record in series.records:
+            value = cumulative.get(record.end_date)
+            if value is None:
+                single[record.end_date] = None
+                continue
+            if record.quarter == 1:
+                single[record.end_date] = value
+                continue
+            previous = series.by_end_date(f"{record.year}{_quarter_end(record.quarter - 1)}")
+            previous_value = (
+                cumulative.get(previous.end_date) if previous is not None else None
+            )
+            single[record.end_date] = (
+                value - previous_value if previous_value is not None else None
+            )
+        return single
+
+    official_deduct_single = _official_single("deduct_parent")
+    credit_single = _official_single("credit_impair")
+
     rows: list[dict[str, Any]] = []
     for record in series.records:
         total_profit = _single(record, "total_profit")
         impairment = _single(record, "assets_impair_loss")
         minority = _single(record, "minority_gain")
+        tax = _single(record, "income_tax")
         parent = _single(record, "n_income_attr_p")
         official_row = official.get(record.end_date) or {}
-        credit = _number(official_row.get("credit_impair"))
+        credit = credit_single.get(record.end_date)
+        credit_cumulative = _number(official_row.get("credit_impair"))
         adjusted_asset = adjusted_asset_credit = None
-        if (
-            total_profit is not None
-            and impairment is not None
-            and minority is not None
-        ):
+        adjusted_reason: str | None = None
+        # 统一税率情景重算所得税，但源表所得税缺失时无法核对“税前−所得税=净利润”
+        # 这条链是否在源数据里成立，重算结果就只是一段无法对账的算术，故标不可得。
+        if total_profit is None:
+            adjusted_reason = "missing_total_profit"
+        elif impairment is None:
+            adjusted_reason = "missing_asset_impairment"
+        elif minority is None:
+            adjusted_reason = "missing_minority_gain"
+        elif tax is None:
+            adjusted_reason = "missing_income_tax"
+        else:
             adjusted_pretax = total_profit - impairment
             adjusted_asset = adjusted_pretax * (1 - tax_rate) - minority
             if credit is not None:
@@ -955,15 +998,18 @@ def build_adjustments(
                 "end_date": record.end_date,
                 "quarter_status": record.status,
                 "reported_parent_net": parent,
-                "official_deducted_parent_net": (
+                "official_deducted_parent_net_single": official_deduct_single.get(record.end_date),
+                "official_deducted_parent_net_cumulative": (
                     _number(official_row.get("deduct_parent"))
                 ),
                 "official_source_url": official_row.get("url"),
                 "official_location": official_row.get("location"),
-                "credit_impairment": credit,
+                "credit_impairment_single": credit,
+                "credit_impairment_cumulative": credit_cumulative,
                 "asset_impairment": impairment,
                 "adjusted_parent_net_strip_asset": adjusted_asset,
                 "adjusted_parent_net_strip_asset_and_credit": adjusted_asset_credit,
+                "adjusted_unavailable_reason": adjusted_reason,
                 "unit": UNIT,
             }
         )
@@ -982,14 +1028,22 @@ def build_adjustments(
                 f"统一按 {tax_rate:.0%} 重算所得税；这不是公司实际税率，也不是默认真值。",
                 "少数股东损益沿用报表实际数并保持不变，属于简化。",
                 "剔除项按报表符号处理：计提为负、转回为正，不能只加回损失而保留转回收益。",
-                "调整后单季利润不得乘以 4 命名为可持续年利润；预测必须另有假设。",
+                "调整后单季利润不是可持续年利润，不得乘以 4 直接年化；预测必须另有假设。",
+                (
+                    "源表利润总额、资产减值、少数股东损益、所得税费用任一缺失，"
+                    "该季调整归母标为不可得，不做部分推算"
+                    "（见每期 adjusted_unavailable_reason）。"
+                ),
             ],
             "not_sustainable_earnings": True,
         },
         "periods": rows,
         "line_types": {
             "reported_parent_net": "报表归母：原披露值",
-            "official_deducted_parent_net": "官方扣非归母：公告来源，缺失即标缺失",
+            "official_deducted_parent_net_single": (
+                "官方扣非归母（单季）：公告累计数按同年度相邻季差分，缺失即标缺失"
+            ),
+            "official_deducted_parent_net_cumulative": "官方扣非归母（累计）：公告原值",
             "adjusted_parent_net_strip_asset": "分析调整情景：仅剔资产减值",
             "adjusted_parent_net_strip_asset_and_credit": "分析调整情景：再剔信用减值",
         },

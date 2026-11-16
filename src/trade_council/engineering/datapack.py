@@ -565,7 +565,7 @@ def build(
             )
             official_count = sum(
                 1 for row in fin_artifacts["adjustments"]["periods"]
-                if row.get("official_deducted_parent_net") is not None
+                if row.get("official_deducted_parent_net_cumulative") is not None
             )
             REG.add(
                 "official_deducted",
@@ -1156,7 +1156,7 @@ def build(
             record.end_date: record.available_at for record in series.records
         }
         for row in adv.get("periods", []):
-            if row.get("official_deducted_parent_net") is None:
+            if row.get("official_deducted_parent_net_cumulative") is None:
                 continue
             evidence.add(
                 dataset_id="financial.official",
@@ -1164,8 +1164,8 @@ def build(
                 primary_key=ts_code,
                 event_date=row["end_date"],
                 available_at=available_by_end.get(row["end_date"]) or f"{asof} 23:59:59",
-                field="official_deducted_parent_net",
-                value=float(row["official_deducted_parent_net"]),
+                field="official_deducted_parent_net_cumulative",
+                value=float(row["official_deducted_parent_net_cumulative"]),
                 unit="CNY",
                 formula="公司公告披露的扣除非经常性损益后的归母净利润（累计口径，需按季差分）",
                 source_hash=snapshot_id,
@@ -1558,18 +1558,32 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
             A("| 报告期 | 报表归母 | 官方扣非归母 | 调整情景：仅剔资产减值 | 调整情景：再剔信用减值 |")
             A("|---|---|---|---|---|")
             for row in rows:
-                def amt(key):
+                reason_labels = {
+                    "missing_total_profit": "缺利润总额",
+                    "missing_asset_impairment": "缺资产减值",
+                    "missing_minority_gain": "缺少数股东损益",
+                    "missing_income_tax": "缺所得税费用",
+                }
+                reason = reason_labels.get(row.get("adjusted_unavailable_reason") or "", "缺输入")
+
+                def amt(key, row=row, reason=reason):
                     value = row.get(key)
-                    return fmt(value / 1e8) if value is not None else "缺失"
+                    if value is not None:
+                        return fmt(value / 1e8)
+                    if key.startswith("adjusted_"):
+                        if row.get("adjusted_unavailable_reason"):
+                            return f"不可得（{reason}）"
+                        return "不可得（未补录信用减值）"
+                    return "缺失"
 
                 A(f"| {row['end_date']} | {amt('reported_parent_net')} | "
-                  f"{amt('official_deducted_parent_net')} | "
+                  f"{amt('official_deducted_parent_net_single')} | "
                   f"{amt('adjusted_parent_net_strip_asset')} | "
                   f"{amt('adjusted_parent_net_strip_asset_and_credit')} |")
             A("")
             scenario = adv.get("scenario", {})
             A(f"- 调整情景公式：{scenario.get('formula', '—')}")
-            A(f"- 情景假设：{'；'.join(scenario.get('assumptions', []))}")
+            A(f"- 情景假设：{'；'.join(str(x).rstrip('。') for x in scenario.get('assumptions', []))}。")
             A("- **调整后单季利润不得乘 4 当作可持续年利润**；它只是这次核对口径下的一个情景。")
             A("")
 

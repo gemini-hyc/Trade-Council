@@ -77,18 +77,19 @@ def ma_alignment(
         )
     descending = all(a > b for _, _, a, b in pairs)
     ascending = all(a < b for _, _, a, b in pairs)
-    described = " > ".join(f"{label}={value:.2f}" for label, value in zip(labels, numbers))
     if descending:
+        described = " > ".join(f"{label}={value:.2f}" for label, value in zip(labels, numbers))
         return MaAlignment(
             state="bull",
             label=f"{name}完全多头排列",
-            detail=f"相邻严格递减：{described}",
+            detail=f"短期均线全部在长期均线之上（数值严格递减）：{described}",
         )
     if ascending:
+        described = " < ".join(f"{label}={value:.2f}" for label, value in zip(labels, numbers))
         return MaAlignment(
             state="bear",
             label=f"{name}完全空头排列",
-            detail=f"相邻严格递增：{described}",
+            detail=f"短期均线全部在长期均线之下（数值严格递增）：{described}",
         )
     switches: list[str] = []
     for index in range(1, len(pairs)):
