@@ -320,7 +320,11 @@ def build_view_model(
                 "kind": "paragraph",
                 "text": "本节只写登记为 business 维度的论点，每条都指向证据 ID；"
                 "财务环比与季度桥接放在第 3 节，不在这里充当业务说明。"
-                "已撤回或已降级的旧判断单列，不混在现行结论里。",
+                + (
+                    "已撤回或已降级的旧判断单列，不混在现行结论里。"
+                    if superseded
+                    else ""
+                ),
             }
         )
         if standing:
