@@ -512,6 +512,10 @@ def test_unreviewed_valuation_cannot_be_published(
                 "note": "重读该角色摘要：相关论点已撤回，摘要里不再保留那些结论",
             },
         )
+    # The revision also moves claims.json to r2, so the conclusion has to say
+    # which revision it now rests on; leaving it on r1 is a real inconsistency,
+    # not a formality.
+    _edit_json(_research_path(run_dir), revision_id="r2")
     report = validate_run(config, "run-1")  # type: ignore[arg-type]
     assert report.ok, report.to_dict()
 

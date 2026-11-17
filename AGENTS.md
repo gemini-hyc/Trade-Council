@@ -50,6 +50,13 @@
 | `validation.json` / `finalize.json` | 机器校验与 `seal-1` 封存记录 | `validate` / `finalize` |
 | `report_view.json` | 报告的唯一数据来源 | `finalize` |
 
+## 复核口径（交付前必查）
+
+程序能查登记与复核，查不出口径。每次 `research review` 的 note 必须回答三问：
+**累计还是单季、同比还是环比、价格变化还是成本贡献**。累计数不能直接回答单季问题
+（先各自相减收入与销量，再算均价）；累计同比不能回答单季环比；没有采购量与库存结转，
+不能把售价涨跌或原料涨幅写成毛利贡献。细则见 `docs/operations.md` §4.1。
+
 ## 开发检查
 
 修改后运行 pytest、ruff、mypy；测试不得访问生产模型 API。保留用户未提交及未跟踪的工作。

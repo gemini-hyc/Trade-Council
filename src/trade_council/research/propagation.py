@@ -240,15 +240,21 @@ def record_revision(
             propagated.append(claim_id)
             queue.append(claim_id)
 
+    revision_id = str(payload.get("revision_id") or "").strip()
+    if not revision_id:
+        revision_id = f"r{_next_revision_number(run_dir)}"
+    # The store carries the revision its claim statuses belong to. Leaving it
+    # at the previous id makes the next validate report RESEARCH_REVISION_MISMATCH
+    # and forces a hand edit of claims.json, which is exactly what the revision
+    # command exists to avoid.
+    store["revision_id"] = revision_id
+
     # Persist claims first: a crash after this point leaves claims and the
     # revision log consistent enough to re-run the command.
     (run_dir / CLAIMS_FILE).write_text(
         json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    revision_id = str(payload.get("revision_id") or "").strip()
-    if not revision_id:
-        revision_id = f"r{_next_revision_number(run_dir)}"
     affected_outputs = [str(item).strip() for item in payload.get("affected_outputs") or [] if str(item).strip()]
     if not affected_outputs:
         raise RevisionError(

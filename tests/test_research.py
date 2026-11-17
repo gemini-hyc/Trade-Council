@@ -202,6 +202,40 @@ def test_revision_propagates_and_blocks_actionable(
     assert "EXECUTION_BEFORE_REVIEW" in codes
 
 
+def test_revision_moves_the_claim_store_to_the_new_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded revision must not leave the claim store on the old id.
+
+    ``validate`` compares the revision a conclusion is based on with the one in
+    ``claims.json``. If ``revise`` forgets to move the store forward, every
+    revision ends with RESEARCH_REVISION_MISMATCH and the only way out is
+    editing claims.json by hand — which hides whether the command ran at all.
+    """
+
+    _config, run_dir, _ = _make_run(tmp_path, monkeypatch)
+    claims_path = run_dir / "claims.json"
+    before = json.loads(claims_path.read_text(encoding="utf-8")).get("revision_id")
+
+    record_revision(
+        run_dir,
+        {
+            "revision_id": "r9",
+            "trigger_evidence_ids": ["F-market-daily-close"],
+            "before": "毛利下滑是一次性因素",
+            "after": "毛利下滑已持续两个季度",
+            "changed_claims": [
+                {"claim_id": "c1", "status": "weakened", "status_reason": "Q3 毛利率继续下降"}
+            ],
+            "affected_outputs": ["fundamental"],
+        },
+    )
+
+    after = json.loads(claims_path.read_text(encoding="utf-8"))["revision_id"]
+    assert before != "r9"
+    assert after == "r9"
+
+
 def test_sell_without_position_is_not_a_指令(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config, run_dir, _ = _make_run(tmp_path, monkeypatch)
     research_path = run_dir / "research_decision.json"

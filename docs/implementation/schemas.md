@@ -243,6 +243,11 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
 只要队列没清空，`validate` / `finalize` 会报 `ROLE_REVIEW_PENDING`。关闭方式有两种：
 重写该角色摘要，或用下面的复核文件按角色逐条记录。
 
+修订同时把 `claims.json` 的 `revision_id` 前移到本次修订号；论点状态属于哪一版，
+文件自己要说清。因此修订后 `research_decision.json` 的 `revision_id` 也必须跟上，
+否则 `validate` 报 `RESEARCH_REVISION_MISMATCH`（「研究结论基于 r3，但 claims.json 是 r4」）。
+这条不是形式要求：结论文件要说清自己基于哪一版论点。
+
 ## 7.1 复核文件（research review）
 
 一次只销一条：要么一条 `output@revision_id`，要么一个 `role@revision_id`，不能同时给。
@@ -266,6 +271,10 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
 
 `reviewed` 标记不是手写的：一个修订的输出队列与角色队列都清空后，
 `revisions.jsonl` 里对应的 `reviewed` 才会变 true，`finalize` 写报告前还会再校正一次。
+
+`note` 不是签名，是复核记录。按 `docs/operations.md` §4.1，它至少要回答三问：
+引用的是累计还是单季、同比还是环比、价格变化还是成本贡献。答不出这三问的复核
+只是把队列清空，不构成复核。
 
 ## 7.2 运行级重算（research recompute）
 
