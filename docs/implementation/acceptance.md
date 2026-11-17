@@ -140,6 +140,8 @@ git push   git@github.com:gemini-hyc/Trade-Council.git main:main
 ```
 
 - `7278084`：R1–R8 与第 4 节补充验收的全部代码、测试、文档、两份报告。
-- 本条同步记录所在文档提交在同一分支，随后以同样方式推送（远端 HEAD 见仓库）。
+- `b6b7d2f`：本条同步记录。
+- `e3202f6`：报告文案修正（无已撤回论点时不显示「旧判断单列」那句）。
+- 以上提交在同一分支上依次快进推送，远端 HEAD 见仓库；本轮最后一个功能提交为 `e3202f6`。
 - `runs/`、`datapacks/`、`.workbuddy/` 不进版本库：运行产物与冻结数据包可重建，
   本次新增 `configs/supplements/jxc-official.json` 作为手工维护的官方补录输入留档。
