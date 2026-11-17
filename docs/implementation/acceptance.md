@@ -127,10 +127,19 @@ mypy src             Success: no issues found in 62 source files
 
 ## 7. Git 与同步
 
-- 本轮代码与文档提交见 §8（提交 ID 在推送后回填）。
+- 基准 HEAD（返工前）：`0e819a8`。
 - 推送沿用 SSH 通道（`~/.gitconfig` 的 `http.proxy` 仍指向失效端口 58731，
-  属于本机配置问题，未改仓库配置、未强推）。
+  属于本机配置问题，未改仓库配置、未强推、未改写历史）。
 
 ## 8. 同步结果
 
-（推送后回填实际提交 ID 与远端 HEAD。）
+```
+git ls-remote git@github.com:gemini-hyc/Trade-Council.git main   # 返工前 0e819a8
+git push   git@github.com:gemini-hyc/Trade-Council.git main:main
+→ 0e819a8..7278084  main -> main（快进）
+```
+
+- `7278084`：R1–R8 与第 4 节补充验收的全部代码、测试、文档、两份报告。
+- 本条同步记录所在文档提交在同一分支，随后以同样方式推送（远端 HEAD 见仓库）。
+- `runs/`、`datapacks/`、`.workbuddy/` 不进版本库：运行产物与冻结数据包可重建，
+  本次新增 `configs/supplements/jxc-official.json` 作为手工维护的官方补录输入留档。
