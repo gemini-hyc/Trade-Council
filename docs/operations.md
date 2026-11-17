@@ -48,27 +48,56 @@ PYTHONPATH=src .venv/bin/python -m trade_council research import-evidence \
 # 修订：记录修订前后、触发证据、受影响输出；依赖论点自动转 unresolved
 PYTHONPATH=src .venv/bin/python -m trade_council research revise \
   --run-id <run_id> --file revision.json
+
+# 复核：一次只销一条（output@revision 或 role@revision）
+PYTHONPATH=src .venv/bin/python -m trade_council research review \
+  --run-id <run_id> --file review.json
+
+# 运行级重算：换税率或补录官方数字，不动冻结数据包
+PYTHONPATH=src .venv/bin/python -m trade_council research recompute \
+  --run-id <run_id> --file scenario.json
 ```
 
 补证文件的字段与示例见 `docs/implementation/schemas.md`。补证写入运行目录的
-`supplemental_evidence.json`，并追加 `evidence_imports.jsonl`；不得修改数据包。
+`supplemental_evidence.json`，来源文件复制到 `supplement/sources/` 并留 sha256，
+同时追加 `evidence_imports.jsonl`；不得修改数据包。
+
+补证与修订只解决「证据与判断」，不自动改数字：要改财务口径就再跑 `research recompute`
+（新目录 `recompute/<scenario_id>/`，`run.financial_override` 指向它）。这两类改动都会让
+已有的封存失效，必须重新 `validate` + `finalize` 才能正式导出。
+
+角色摘要与中央论点表必须一致：角色引用的 `claim_id` 不存在会失败
+（`ROLE_CLAIM_UNKNOWN`）；论点状态变化后，写过这些论点的角色进入待重审队列，
+没关闭就 `ROLE_REVIEW_PENDING`。关闭方式：重写角色摘要，或 `research review --role`。
 
 ## 5. 完成与交付
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m trade_council validate --run-id <run_id>       # 机器校验
-PYTHONPATH=src .venv/bin/python -m trade_council finalize --run-id <run_id>       # 校验+审计+封存
+PYTHONPATH=src .venv/bin/python -m trade_council submit --run-id <run_id>        # 产物齐了才推进
+PYTHONPATH=src .venv/bin/python -m trade_council validate --run-id <run_id>      # 机器校验
+PYTHONPATH=src .venv/bin/python -m trade_council finalize --run-id <run_id>      # 校验+审计+封存
 PYTHONPATH=src .venv/bin/python -m trade_council export --run-id <run_id> --out-dir <交付目录>
 ```
 
+`submit` 检查角色产物、`decision.json` 与三份研究文件是否齐全；齐全才把状态推进到
+`DECIDED`。这一步不需要、也不允许手改 `run.json` 的状态。
+
 `validate` 检查：输入绑定未变、启用角色产物齐全且符合 Schema、证据存在且不晚于基准日、
-类型一致、研究结构合规、关键缺口已反映到判断、规则树内部一致、执行语义不越界。
-`finalize` 在 `validate` 通过后生成报告并跑审计；审计 FAIL 只写 `report.draft.*` 并置
-`AUDIT_FAILED`，不得当成交付物。`export` 要求 `finalize.json.ok` 且 `report.html` 哈希匹配。
+类型一致、研究结构合规（含三份研究文件必需）、角色论点引用一致、关键缺口已反映到判断、
+规则树内部一致、执行语义不越界。
+
+`finalize` 在 `validate` 通过后生成报告、跑审计并写 `seal-1` 封存（输入绑定、角色产物、
+研究文件、revisions、规则树、账户上下文、重算产物共 37 项依赖）。审计 FAIL 只写
+`report.draft.*` 并置 `AUDIT_FAILED`，不得当成交付物。
+
+`export` 要求 `finalize.json.ok`、`report.html` 哈希匹配，并且逐项核对封存依赖；
+任何依赖在封存后变化都会被拒绝。确需保留旧版本时用 `--historical`，
+文件名会带「已封存历史版本」，并给出 warning。
 
 成功后会得到 `report.md`、`report.html` 与 `report_view.json`（三者同一数据源）。
 报告结构：6 段主文（判断 / 业务 / 财务桥接 / 估值与技术 / 账户与执行 / 下次检查）+
 附录（全部启用角色、多空论点、失效论点、更正记录、缺口、证据索引）。
+第 2 节只由 `topic=business` 的论点生成，没有就明说没回答。
 
 ## 6. 查询
 

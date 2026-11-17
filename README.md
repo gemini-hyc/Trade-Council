@@ -27,8 +27,10 @@ batch_research_enabled: false
 ```bash
 PYTHONPATH=src .venv/bin/python -m trade_council config validate
 PYTHONPATH=src .venv/bin/python -m trade_council analyze 600362.SH --asof 2026-11-13
+PYTHONPATH=src .venv/bin/python -m trade_council submit --run-id <run_id>
 PYTHONPATH=src .venv/bin/python -m trade_council validate --run-id <run_id>
 PYTHONPATH=src .venv/bin/python -m trade_council finalize --run-id <run_id>
+PYTHONPATH=src .venv/bin/python -m trade_council export --run-id <run_id> --out-dir reports
 ```
 
 `analyze` 准备本地数据，生成：
@@ -44,7 +46,7 @@ runs/datapacks/<代码>/                    数据摘要、manifest、evidence�
 
 **终端程序无法自行调用当前聊天会话的大模型。** 在聊天中让当前 agent 继续执行生成的任务。它需要实际读取数据，完成各角色分析及核查，保存产物并交付报告。仅生成上述文件不表示分析完成，尚未完成时 `report` 命令会拒绝生成最终报告。
 
-完成分析后必须写 `research_questions.json`、`claims.json`、`research_decision.json`（可选 `data_gaps.json`、`trading_rules.json`），再依次跑 `validate` 与 `finalize`。`finalize` 通过才写正式报告，审计失败只留草稿。补证与修订用 `research import-evidence` / `research revise`，字段见 `docs/implementation/schemas.md`。
+完成分析后必须写 `research_questions.json`、`claims.json`、`research_decision.json`（可选 `data_gaps.json`、`trading_rules.json`），先 `submit` 推进状态，再依次跑 `validate` 与 `finalize`（不要手改 `run.json` 的状态）。`finalize` 通过才写正式报告并留下 `seal-1` 封存；审计失败只留草稿。补证、修订、复核、重算分别用 `research import-evidence` / `research revise` / `research review` / `research recompute`，字段见 `docs/implementation/schemas.md`。封存后任何依赖变化都会让 `export` 拒绝正式导出，需要保留旧版时用 `export --historical`。
 
 常用参数：`--datapack <路径>`、`--run-id <ID>`、`--resume`、`--include-news`、`--capital`、`--position-state`、`--position-shares`、`--position-opened-date`。不填写账户信息也能做研究，具体股数与账户仓位保留为未知。
 

@@ -135,8 +135,9 @@ def test_digest_declares_price_basis_and_roe_definition(tmp_path: Path) -> None:
     digest = (tmp_path / "DATA_DIGEST.md").read_text(encoding="utf-8")
     assert "完全空头排列" in digest
     assert "完全多头排列" not in digest
-    assert "期末净资产口径简单年化 ROE 估算" in digest
-    assert "不是公司披露的加权平均净资产收益率" in digest
+    assert "ROE估算（累计年化）" in digest
+    assert "ROE估算（单季×4）" in digest
+    assert "不能称为公司披露的加权平均 ROE" in digest
     assert "未复权" in digest and "前复权" in digest
     assert ">100% 为健康" not in digest
 

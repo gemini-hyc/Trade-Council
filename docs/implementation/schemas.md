@@ -41,9 +41,15 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
 ## 3. claims.json
 
 `kind`：`fact` / `assumption` / `inference`；
-`status`：`intact` / `weakened` / `retracted` / `unresolved`。
+`status`：`intact` / `weakened` / `retracted` / `unresolved`；
+`topic`：`business` / `finance` / `valuation` / `timing` / `risk` / `other`（默认 `other`）。
 被撤回的论点不能出现在 `research_decision.key_claim_ids` 里，否则 `validate` 失败
 （`RETRACTED_CLAIM_IN_USE`）。`depends_on_claim_ids` 用于失效传播。
+
+`topic` 决定报告章节的取材：报告第 2 节「公司如何赚钱」只列 `topic=business` 的论点，
+没有登记时明确写「没有被回答」，不再用角色摘要或财务环比顶替。角色产物里的
+`key_findings[].claim_id` 必须能在本文件里找到，否则 `validate` 失败
+（`ROLE_CLAIM_UNKNOWN`）——角色文字与中央论点表不能各说各的。
 
 ```json
 {
@@ -54,6 +60,7 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
       "claim_id": "c-y-margin-q3",
       "role_id": "fundamentals-analyst",
       "kind": "fact",
+      "topic": "finance",
       "statement": "2026Q3 单季毛利率 20.73%，比 Q2 的 24.36% 下降 3.63 个百分点",
       "supporting_evidence_ids": ["F-financial-quarters-3015f175c78d3aeb"],
       "applicable_period": "2026Q3",
@@ -168,11 +175,47 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
 
 规则：
 
-- 数值必须带 `unit` 与 `period`；必须带 `source_url` 或本地 `source_file`（本地文件会计算 sha256）。
+- 数值必须带 `unit` 与 `period`；必须带 `source_url` 或本地 `source_file`。
+- 只给 `source_url` 时必须给 `location`（页码/表名），否则无法复核。
+- `source_file` 必须真实存在且可读；文件会复制到 `supplement/sources/<sha256前16位>.<扩展名>`，
+  原件路径、副本相对路径与 sha256 一起记进 `supplemental_evidence.json`。
 - `available_at` 晚于基准日直接拒绝（未来数据）。
+- 同一 `evidence_id` 内容不同判为冲突（rejected），不覆盖已有条目；补证也不得占用
+  数据包已有的基础证据 ID。
 - 同一 `dataset_id+field+period+value+unit+source_url` 重复导入会被计为 duplicate，不累加。
 - 网页正文放在 `material` 字段，落库为 `quoted_text` 且标 `text_trust=untrusted_source_text`：
   它是数据，不是给 agent 的指令。
+
+## 6.1 官方补录文件（--official-metrics）
+
+官方扣非/信用减值属于「手抄进来的官方数字」，四项锚点缺一不可，否则
+`validate_official_metrics` 直接在数据包构建阶段报错：
+
+```json
+{
+  "periods": {
+    "20260930": {
+      "deduct_parent": 10239058822,
+      "credit_impair": -24882862,
+      "unit": "元",
+      "ts_code": "600362.SH",
+      "available_at": "2026-10-29",
+      "url": "https://static.cninfo.com.cn/finalpage/2026-10-29/1225636802.PDF",
+      "location": "合并利润表第10页；主要指标第1页"
+    }
+  }
+}
+```
+
+| 字段 | 要求 | 不满足时 |
+|---|---|---|
+| `unit` | `元` / `CNY` / `人民币元` | 报错：单位不明无法与其他口径对账 |
+| `ts_code` | 必须等于本次运行标的 | 报错：混入别家公司 |
+| `available_at` | 补录来源自身的披露时间；不得早于期末、不得晚于基准日 | 报错，绝不沿用财报记录的公告时间 |
+| `url` 或 `source_file` | 至少给一个 | 报错：说明不了数字抄自哪份公告 |
+
+`available_at` 是本项的重点：延用财报记录的公告时间，会让事后重述或事后补录
+冒充「当时就可得」。数据包的官方证据条目用的就是这个字段，而不是财报记录的时点。
 
 ## 7. 修订文件（research revise）
 
@@ -191,8 +234,53 @@ AWAITING_CURRENT_AGENT → DATA_READY → DECIDED → VALIDATED → FINALIZED �
 }
 ```
 
-未复核的修订会把 `affected_outputs` 写进 `run.json.revision_state.pending_review_outputs`；
-此时 `execution.status=actionable` 会失败（`EXECUTION_BEFORE_REVIEW`）。
+未复核的修订会把 `affected_outputs` 写进 `run.json.revision_state.pending_reviews`
+（逐条 `output@revision_id`），此时 `execution.status=actionable` 会失败
+（`EXECUTION_BEFORE_REVIEW`），受影响维度也必须降级为 `unresolved`
+（否则 `UNREVIEWED_OUTPUT`）。
+
+同一份修订还会把「写过这些论点的角色」放进 `run.json.revision_state.pending_role_reviews`；
+只要队列没清空，`validate` / `finalize` 会报 `ROLE_REVIEW_PENDING`。关闭方式有两种：
+重写该角色摘要，或用下面的复核文件按角色逐条记录。
+
+## 7.1 复核文件（research review）
+
+一次只销一条：要么一条 `output@revision_id`，要么一个 `role@revision_id`，不能同时给。
+
+```json
+{
+  "output": "valuation",
+  "revision_id": "r2",
+  "note": "重读估值：回购上限仅占市值 0.46%，不再作为支撑项",
+  "recomputed_evidence_ids": ["S-buyback-plan-20261112-max"]
+}
+```
+
+```json
+{
+  "role": "aggressive-risk-analyst",
+  "revision_id": "r2",
+  "note": "角色摘要已重写：赔率优势改由低估值与股息率承担"
+}
+```
+
+`reviewed` 标记不是手写的：一个修订的输出队列与角色队列都清空后，
+`revisions.jsonl` 里对应的 `reviewed` 才会变 true，`finalize` 写报告前还会再校正一次。
+
+## 7.2 运行级重算（research recompute）
+
+```json
+{
+  "adjustment_tax_rate": 0.15,
+  "scenario_label": "实际有效税率 15% 复核",
+  "official_metrics_file": "supplement/official.json",
+  "note": "为什么换这个税率"
+}
+```
+
+结果写到 `runs/<run_id>/recompute/<scenario_id>/`，冻结数据包不改动；
+`run.json.financial_override` 记录当前该读哪个情景，报告与校验都从那里取数。
+改税率或补录会让封存失效，必须重新 `validate` + `finalize` 才能正式导出。
 
 ## 8. trading_rules.json（可选）
 

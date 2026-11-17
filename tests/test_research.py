@@ -322,3 +322,64 @@ def test_cli_imports_and_revises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         == 0
     )
     assert (run_dir / "revisions.jsonl").is_file()
+
+
+def test_missing_source_file_is_rejected(tmp_path: Path) -> None:
+    result = _import(
+        tmp_path,
+        [_item(source_url="", source_file=str(tmp_path / "不存在的公告.pdf"))],
+    )
+    assert not result.added
+    assert result.rejected
+    assert "不存在" in result.rejected[0]["reason"]
+    assert not (tmp_path / "supplemental_evidence.json").exists()
+
+
+def test_existing_source_file_is_copied_and_hashed(tmp_path: Path) -> None:
+    source = tmp_path / "三季报.pdf"
+    source.write_bytes(b"%PDF-1.7 2026Q3 report")
+    result = _import(tmp_path, [_item(source_url="", source_file=str(source), location="第 2 页")])
+    assert result.added, result.to_dict()
+    store = json.loads((tmp_path / "supplemental_evidence.json").read_text(encoding="utf-8"))
+    item = store["items"][0]
+    import hashlib
+
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert item["source_file_sha256"] == expected
+    assert item["source_file"] == str(source)
+    copy = tmp_path / item["source_copy"]
+    assert copy.is_file()
+    assert hashlib.sha256(copy.read_bytes()).hexdigest() == expected
+    log = json.loads((tmp_path / "evidence_imports.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert log["stored_sources"][0]["source_copy"] == item["source_copy"]
+
+
+def test_url_evidence_needs_a_location(tmp_path: Path) -> None:
+    result = _import(tmp_path, [_item(location="")])
+    assert not result.added
+    assert "location" in result.rejected[0]["reason"]
+
+
+def test_same_id_with_different_content_is_a_conflict(tmp_path: Path) -> None:
+    first = _import(tmp_path, [_item(evidence_id="S-fixed")])
+    assert first.added
+    second = _import(tmp_path, [_item(evidence_id="S-fixed", value=-11111111)])
+    assert not second.added
+    assert second.rejected
+    assert "冲突" in second.rejected[0]["reason"]
+    store = json.loads((tmp_path / "supplemental_evidence.json").read_text(encoding="utf-8"))
+    assert len(store["items"]) == 1
+    assert store["items"][0]["value"] == -24882862
+
+
+def test_supplement_cannot_take_over_a_pack_evidence_id(tmp_path: Path) -> None:
+    result = import_evidence(
+        tmp_path,
+        {"items": [_item(evidence_id="F-market-daily-close", value=999)]},
+        symbol="600362.SH",
+        asof=ASOF,
+        reserved_ids={"F-market-daily-close"},
+    )
+    assert not result.added
+    assert result.rejected
+    assert "基础证据" in result.rejected[0]["reason"]

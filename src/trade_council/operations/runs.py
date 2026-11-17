@@ -281,6 +281,7 @@ def export_report(
     *,
     out_dir: Path | None = None,
     runs_root: Path | None = None,
+    label: str = "",
 ) -> Path:
     run_dir = (runs_root or (project_root / "runs")) / run_id
     report = run_dir / "report.html"
@@ -293,10 +294,17 @@ def export_report(
         raise OperationError(f"Run has invalid asof: {state.get('asof')}")
     target_dir = (out_dir or project_root / "exports").expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{stock_name}-{asof}.html"
+    suffix = f"-{_safe_filename(label)}" if label else ""
+    target = target_dir / f"{stock_name}-{asof}{suffix}.html"
     shutil.copyfile(report, target)
     exports = state.setdefault("exports", [])
-    exports.append({"path": str(target), "exported_at": datetime.now().isoformat(timespec="seconds")})
+    exports.append(
+        {
+            "path": str(target),
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "label": label or "current",
+        }
+    )
     state["updated_at"] = datetime.now().isoformat(timespec="seconds")
     (run_dir / "run.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2),

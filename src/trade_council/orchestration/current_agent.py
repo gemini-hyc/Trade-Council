@@ -15,6 +15,8 @@ from ..decision.risk_rules import TradeContext
 from ..schemas import DecisionPlan, FinalDecision, RoleOutput, StrictModel, TradeProposal
 
 RUN_SCHEMA_VERSION = "run-1"
+#: Marks a run whose research files are mandatory and strictly schema-checked.
+ANALYSIS_SCHEMA_VERSION = "research-1"
 
 
 def _sha256(path: Path) -> str:
@@ -200,6 +202,7 @@ def prepare_current_agent_task(
                              "trade_instructions": False},
         "external_model_calls": 0,
         "schema_version": RUN_SCHEMA_VERSION,
+        "analysis_schema": ANALYSIS_SCHEMA_VERSION,
     }
     run_dir.mkdir(parents=True, exist_ok=True)
     request = {
@@ -238,9 +241,18 @@ def prepare_current_agent_task(
    结论写入 `research_decision.json`；三者格式见 `docs/implementation/schemas.md`。
 4. 缺失不当作零，过期不当作最新；不能验证的问题保留为数据缺口。识别到输入错误应留痕更正。
 5. 资金与持仓未提供时不虚构金额、股数和账户仓位。不宣称识别或使用了无法确认的模型版本。
-6. 完成后运行 `trade-council validate --run-id {run_dir.name}`；通过后再运行
-   `trade-council finalize --run-id {run_dir.name}`。不要在终端之外手改 run.json 的完成状态。
-7. 不伪造 API 调用记录、token 计数或费用；当前会话用量不可得时注明不可得。
+   执行状态为 actionable 时，target_account_weight / sell_fraction_of_current / cash_amount
+   各自依赖的账户输入必须真实存在（见 `execution.requires`），否则只能写 blocked。
+6. 补齐产物后运行 `trade-council submit --run-id {run_dir.name}` 推进状态（不要手改
+   run.json），再运行 `trade-council validate --run-id {run_dir.name}`，通过后运行
+   `trade-council finalize --run-id {run_dir.name}`。缺少任一角色或三份研究文件都会失败。
+7. 补证用 `research import-evidence`，修订用 `research revise`（必须写 affected_outputs），
+   复核用 `research review`（一次只销一条 output@revision 或 role@revision）。修订未复核时，
+   受影响维度必须降级为 unresolved，写过相关论点的角色也要重审，否则 validate 失败。
+   要改财务口径（税率、官方补录）用 `research recompute`，不要动数据包。
+   报告第 2 节「公司如何赚钱」只认 claims.json 里 topic=business 的论点，
+   没有登记就如实写没回答，不要用财务环比代替。
+8. 不伪造 API 调用记录、token 计数或费用；当前会话用量不可得时注明不可得。
 """
     (run_dir / "CURRENT_AGENT_TASK.md").write_text(task, encoding="utf-8")
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")

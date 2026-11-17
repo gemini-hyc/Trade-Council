@@ -23,6 +23,7 @@ import json
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +189,7 @@ class QuarterRecord:
     status: str
     reason: str
     values: dict[str, QuarterValue] = field(default_factory=dict)
+    comparability: str = "unconfirmed"
 
 
 @dataclass(frozen=True)
@@ -209,14 +211,74 @@ class QuarterSeries:
         return [record for record in self.records if record.status == "ok"]
 
 
-def _comparability_issue(current: pd.Series, previous: pd.Series) -> str:
-    """Return a reason when two cumulative rows cannot be subtracted."""
+def _version_metadata(
+    frame: pd.DataFrame, flow_fields: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Describe how many disclosure versions each period has in this frame.
 
-    for column, label in (("report_type", "报表类型"), ("update_flag", "更新标记")):
-        if column in current.index and column in previous.index:
-            left, right = current.get(column), previous.get(column)
-            if pd.notna(left) and pd.notna(right) and str(left) != str(right):
-                return f"{label}不一致（{left} vs {right}），视为重述或口径不同，不做无条件差分"
+    One row per period is normal but proves nothing about restatements: the
+    local store keeps only the latest version, so the honest state is
+    ``unconfirmed``. Two rows with different values for the same period is a
+    restatement that must not be differenced across.
+    """
+
+    stamp_column = None
+    for candidate in ("f_ann_date", "ann_date", "available_at"):
+        if candidate in frame.columns:
+            stamp_column = candidate
+            break
+    meta: dict[str, dict[str, Any]] = {}
+    for end_date, group in frame.groupby("end_date", sort=False):
+        key = str(end_date)
+        ordered = group
+        if stamp_column is not None:
+            ordered = group.assign(
+                _stamp=pd.to_datetime(group[stamp_column], errors="coerce")
+            ).sort_values("_stamp")
+        first = ordered.iloc[0]
+        last = ordered.iloc[-1]
+        changed = False
+        if len(ordered) > 1:
+            for field_name in flow_fields:
+                if field_name not in ordered.columns:
+                    continue
+                left, right = _number(first.get(field_name)), _number(last.get(field_name))
+                if left != right:
+                    changed = True
+                    break
+        meta[key] = {
+            "versions": len(ordered),
+            "changed": changed,
+            "first_announce": (
+                str(first.get(stamp_column)) if stamp_column is not None else None
+            ),
+            "last_announce": (
+                str(last.get(stamp_column)) if stamp_column is not None else None
+            ),
+            "update_flags": sorted(
+                {
+                    str(value)
+                    for value in group.get("update_flag", pd.Series(dtype=object)).tolist()
+                    if value is not None and str(value) not in {"nan", "None"}
+                }
+            ),
+        }
+    return meta
+
+
+def _comparability_issue(current: pd.Series, previous: pd.Series) -> str:
+    """Return a reason when two cumulative rows cannot be subtracted.
+
+    Only the statement type is compared across periods. ``update_flag`` is a
+    per-disclosure marker, so a difference between two different periods says
+    nothing about comparability; treating it as a restatement signal produced
+    both false positives and false confidence.
+    """
+
+    if "report_type" in current.index and "report_type" in previous.index:
+        left, right = current.get("report_type"), previous.get("report_type")
+        if pd.notna(left) and pd.notna(right) and str(left) != str(right):
+            return f"报表类型不一致（{left} vs {right}），不做无条件差分"
     return ""
 
 
@@ -240,6 +302,17 @@ def quarterize(
         raise FinancialDataError("cumulative frame requires end_date")
     frame["end_date"] = frame["end_date"].map(_clean_end_date)
     frame = frame[frame["end_date"].str.len() == 8]
+    # Keep every disclosure version long enough to see whether the same period
+    # was restated, then difference only within the latest version.
+    version_meta = _version_metadata(frame, flow_fields)
+    announce_column = next(
+        (name for name in ("f_ann_date", "ann_date", "available_at") if name in frame.columns),
+        None,
+    )
+    if announce_column is not None:
+        frame = frame.assign(
+            _announce_order=pd.to_datetime(frame[announce_column], errors="coerce")
+        ).sort_values(["end_date", "_announce_order"])
     frame = frame.drop_duplicates(subset=["end_date"], keep="last")
     frame = frame.sort_values("end_date").reset_index(drop=True)
     available_column = "available_at" if "available_at" in frame.columns else None
@@ -259,6 +332,7 @@ def quarterize(
         stamp = _timestamp(row.get(available_column)) if available_column else None
         record_status = "ok"
         record_reason = ""
+        own_meta = version_meta.get(end_date) or {}
         predecessor_key = (year, quarter - 1)
         predecessor: pd.Series | None = None
         if quarter > 1:
@@ -274,6 +348,41 @@ def quarterize(
                 if issue:
                     record_status = "restated_incomparable"
                     record_reason = issue
+                else:
+                    previous_meta = version_meta.get(str(predecessor["end_date"])) or {}
+                    previous_stamp = (
+                        _timestamp(predecessor.get(available_column))
+                        if available_column
+                        else None
+                    )
+                    if own_meta.get("changed"):
+                        record_status = "restated_incomparable"
+                        record_reason = (
+                            "本季同一报告期存在多份披露版本且数值不同，"
+                            "与上一季相减会混用版本，故单季不可得"
+                        )
+                    elif previous_meta.get("changed"):
+                        record_status = "restated_incomparable"
+                        record_reason = (
+                            f"{predecessor['end_date']} 存在重述版本，"
+                            "与其相减会混用重述前后数据，故单季不可得"
+                        )
+                    elif (
+                        previous_stamp is not None
+                        and stamp is not None
+                        and previous_stamp > stamp
+                    ):
+                        record_status = "restated_incomparable"
+                        record_reason = (
+                            f"上一季累计数在本季披露之后才更新（{previous_stamp.date()} > "
+                            f"{stamp.date()}），说明存在事后重述，不做无条件差分"
+                        )
+        if own_meta.get("changed"):
+            comparability = "changed"
+        elif own_meta.get("versions", 1) > 1:
+            comparability = "confirmed"
+        else:
+            comparability = "unconfirmed"
         values: dict[str, QuarterValue] = {}
         for field_name in flow_fields:
             cumulative_value = _number(row.get(field_name))
@@ -324,6 +433,7 @@ def quarterize(
                 status=record_status,
                 reason=record_reason,
                 values=values,
+                comparability=comparability,
             )
         )
     return QuarterSeries(symbol=symbol, records=records, missing_fields=missing)
@@ -365,6 +475,7 @@ def merge_availability(
                 status=record.status,
                 reason=record.reason,
                 values=record.values,
+                comparability=record.comparability,
             )
         )
     return QuarterSeries(symbol=series.symbol, records=updated, missing_fields=series.missing_fields)
@@ -668,22 +779,38 @@ def cash_conversion(record: QuarterRecord) -> dict[str, Any]:
 
 
 def simple_annualized_roe(record: QuarterRecord, equity: float | None) -> dict[str, Any]:
-    """Period-end-equity simple annualisation, explicitly not official ROE."""
+    """Simple annualisation on period-end equity, in two explicit versions.
 
-    parent_net = _single(record, "n_income_attr_p")
-    value: float | None = None
-    if parent_net is not None and equity not in (None, 0):
-        assert equity is not None
-        value = parent_net / equity * (12 / (record.quarter * 3))
+    The numerator and the annualisation factor must describe the same period:
+    a year-to-date profit is scaled by ``12 / months_reported``, while a single
+    quarter is scaled by 4. Mixing a single-quarter numerator with the YTD
+    factor understates ROE by roughly the number of quarters elapsed, which is
+    why both are reported separately instead of one blended number.
+    """
+
+    ytd_parent = record.values.get("n_income_attr_p")
+    ytd_value = ytd_parent.cumulative if ytd_parent is not None else None
+    single_value = _single(record, "n_income_attr_p")
+    months = record.quarter * 3
+    ytd_roe: float | None = None
+    single_roe: float | None = None
+    if equity is not None and equity != 0:
+        if ytd_value is not None:
+            ytd_roe = ytd_value / equity * (12 / months)
+        if single_value is not None:
+            single_roe = single_value / equity * 4
     return {
-        "value": value,
-        "definition": "期末净资产口径简单年化 ROE 估算",
-        "formula": "单季归母净利润 ÷ 期末归母净资产 × (12 ÷ 报告期月数)",
-        "period": f"YTD to Q{record.quarter}, annualised by 12/{record.quarter * 3}",
+        "ytd_value": ytd_roe,
+        "single_quarter_value": single_roe,
+        "definition": "期末净资产口径简单年化 ROE 估算（两种口径分列）",
+        "ytd_formula": "年初至本期累计归母净利润 ÷ 期末归母净资产 × (12 ÷ 累计报告月数)",
+        "single_quarter_formula": "单季归母净利润 ÷ 期末归母净资产 × 4",
+        "period": f"YTD to Q{record.quarter}（{months} 个月）",
         "not_official": True,
         "note": (
-            "这不是公司披露的加权平均净资产收益率。官方加权 ROE 需单列来源与期间，"
-            "不得用 PB/PE 隐含比值代替。"
+            "这不是公司披露的加权平均净资产收益率。两种口径不能互相替代："
+            "累计口径适合与年度 ROE 比较，单季口径反映当期盈利能力但不代表全年。"
+            "官方加权 ROE 需单列来源与期间，不得用 PB/PE 隐含比值代替。"
         ),
     }
 
@@ -733,6 +860,42 @@ def build_ttm(
     value = fiscal_fy + current_ytd - prior_ytd
     stamps = [stamp for _, stamp in legs.values() if stamp is not None]
     available = max(stamps) if stamps else None
+    # TTM mixes three disclosure versions, so it inherits the weakest
+    # comparability of its legs instead of silently calling the result clean.
+    # Checking the legs alone is not enough: the current leg is a year-to-date
+    # figure that spans every quarter of the fiscal year, so a restatement of
+    # any of those quarters means the cumulative number may predate the restated
+    # values. The window is therefore (prior FY end, current end date], plus the
+    # two prior-year legs.
+    fiscal_end = f"{year - 1}1231"
+    window = [
+        item for item in series.records if fiscal_end < item.end_date <= record.end_date
+    ]
+    involved = {item.end_date: item for item in [*window, record, prior, fiscal] if item}
+    restated = sorted(
+        end_date_
+        for end_date_, item in involved.items()
+        if item.comparability == "changed" or item.status == "restated_incomparable"
+    )
+    leg_states = [
+        item.comparability for item in (record, prior, fiscal) if item is not None
+    ]
+    if restated:
+        comparability = "changed"
+        comparability_note = (
+            "TTM 窗口内存在重述期次（" + "、".join(restated) + "）："
+            "本地库保留了同一报告期的多份披露且数值不同，三条累计腿可能取自重述前版本，"
+            "跨期比较需注明口径"
+        )
+    elif leg_states and all(state == "confirmed" for state in leg_states):
+        comparability = "confirmed"
+        comparability_note = ""
+    else:
+        comparability = "unconfirmed"
+        comparability_note = (
+            "三条腿来自三次不同披露；本地库只保留每期最新版本，"
+            "无法证明与当时披露一致（unconfirmed），跨期比较需注明"
+        )
     return {
         "status": "ok",
         "value": value,
@@ -740,6 +903,9 @@ def build_ttm(
         "formula": "上年全年 + 本年累计 − 上年同期累计",
         "legs": {name: value for name, (value, _) in legs.items()},
         "available_at": available,
+        "comparability": comparability,
+        "comparability_note": comparability_note,
+        "comparability_window": sorted(involved),
     }
 
 
@@ -756,6 +922,7 @@ def quarters_frame(series: QuarterSeries, extra: dict[str, dict[str, float | Non
             "available_at": record.available_at,
             "quarter_status": record.status,
             "quarter_reason": record.reason,
+            "comparability": record.comparability,
         }
         cumulative_values: list[float | None] = []
         single_values: list[float | None] = []
@@ -772,13 +939,21 @@ def quarters_frame(series: QuarterSeries, extra: dict[str, dict[str, float | Non
                 row[key] = extra_value
         row["gross_profit_q"] = gross_profit(record)
         row["gross_margin_q"] = ratios(record)["gross_margin"]["value"]
-        row["roe_simple_annualised_estimate"] = simple_annualized_roe(
-            record, _single_equity(record)
-        )["value"]
+        roe = simple_annualized_roe(record, _single_equity(record))
+        row["roe_simple_annualised_ytd"] = roe["ytd_value"]
+        row["roe_simple_annualised_single_q"] = roe["single_quarter_value"]
         rows.append(row)
     frame = pd.DataFrame(rows)
     if not frame.empty:
-        ordered = ["end_date", "year", "quarter", "available_at", "quarter_status", "quarter_reason"]
+        ordered = [
+            "end_date",
+            "year",
+            "quarter",
+            "available_at",
+            "quarter_status",
+            "quarter_reason",
+            "comparability",
+        ]
         frame = frame[[column for column in ordered if column in frame.columns] +
                       [column for column in frame.columns if column not in ordered]]
     return frame
@@ -802,8 +977,9 @@ def build_financial_artifacts(
     cashflow: pd.DataFrame | None,
     balance: pd.DataFrame | None,
     official_metrics: dict[str, Any] | None = None,
+    adjustment_tax_rate: float | None = None,
 ) -> dict[str, Any]:
-    """Write ``financial_quarters.csv`` and ``earnings_bridge.json``."""
+    """Write ``financial_quarters.csv``, ``earnings_bridge.json`` and adjustments."""
 
     flow_fields = list(INCOME_FLOW_FIELDS) + [
         field_name for field_name in CASH_FLOW_FIELDS if cashflow is not None
@@ -856,6 +1032,7 @@ def build_financial_artifacts(
             status=record.status,
             reason=record.reason,
             values=values,
+            comparability=record.comparability,
         )
 
     frame = quarters_frame(series)
@@ -897,6 +1074,11 @@ def build_financial_artifacts(
             "存量科目（资产负债、股数）不做单季差分。",
             "未单列项目净额是残差，不能据此把差额归因到套保、汇兑或主营业务。",
             "容差 1 元，按源表元级数据对账，不用展示层四舍五入掩盖差异。",
+            (
+                "comparability=unconfirmed 表示本地库每期只有一个披露版本，"
+                "无法证明与当时披露一致；changed 表示同一期间出现数值不同的多份披露，"
+                "跨期相减会混用版本。"
+            ),
         ],
     }
     (out_dir / "earnings_bridge.json").write_text(
@@ -906,6 +1088,9 @@ def build_financial_artifacts(
     adjustments = build_adjustments(
         series=series,
         official_metrics=official_metrics,
+        tax_rate=adjustment_tax_rate,
+        tax_rate_source="scenario" if adjustment_tax_rate is not None else "default",
+        asof=asof,
     )
     (out_dir / "financial_adjustments.json").write_text(
         json.dumps(adjustments, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -922,27 +1107,162 @@ def build_financial_artifacts(
 
 DEFAULT_ADJUSTMENT_TAX_RATE = 0.23
 
+OFFICIAL_METRIC_FIELDS = ("deduct_parent", "credit_impair")
+OFFICIAL_UNITS = {"CNY": "CNY", "RMB": "CNY", "元": "CNY", "人民币元": "CNY", "人民币": "CNY"}
+
+
+def _parse_calendar_date(value: Any) -> date | None:
+    text = str(value).strip()[:10].replace("/", "-")
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    if len(text) != 10:
+        return None
+    try:
+        return date(int(text[:4]), int(text[5:7]), int(text[8:10]))
+    except ValueError:
+        return None
+
+
+def validate_official_metrics(
+    official_metrics: dict[str, Any] | None,
+    *,
+    symbol: str,
+    asof: str = "",
+) -> dict[str, Any]:
+    """Check a hand-entered official supplement before it is treated as official.
+
+    An official number is only as good as its four anchors: which company, which
+    period, which unit, and when the *source itself* became public. The last one
+    is the trap. Borrowing the announcement time of the financial-statement
+    record would let a restatement published later — or a figure typed in after
+    the fact — claim it was knowable on the as-of date, which is exactly the
+    failure mode a point-in-time audit exists to catch. Each period must
+    therefore carry its own ``available_at``, and this function refuses to fill
+    the field in from anything else.
+    """
+
+    if official_metrics is None:
+        return {"periods": {}}
+    if not isinstance(official_metrics, dict):
+        raise FinancialDataError(
+            '官方补录必须是 JSON 对象，形如 {"periods": {"20260930": {...}}}'
+        )
+    if "periods" not in official_metrics:
+        raise FinancialDataError(
+            '官方补录缺少 periods 字段；本次没有官方数字请写成 {"periods": {}}'
+        )
+    periods = official_metrics["periods"]
+    if not isinstance(periods, dict):
+        raise FinancialDataError("官方补录的 periods 必须是「期末日期 → 指标」的对象")
+    asof_date = _parse_calendar_date(asof) if asof else None
+
+    checked: dict[str, Any] = {}
+    for raw_end, entry in periods.items():
+        end_date = str(raw_end).strip()
+        period_end = _parse_calendar_date(end_date) if len(end_date) == 8 else None
+        if period_end is None:
+            raise FinancialDataError(
+                f"官方补录的期间键必须是 8 位期末日期（如 20260930），收到 {raw_end!r}"
+            )
+        if not isinstance(entry, dict):
+            raise FinancialDataError(f"{end_date} 的补录内容必须是对象")
+        values: dict[str, float] = {}
+        for field_name in OFFICIAL_METRIC_FIELDS:
+            if entry.get(field_name) is None:
+                continue
+            raw_value = entry[field_name]
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise FinancialDataError(
+                    f"{end_date} 的 {field_name} 必须是数字（单位为元），收到 {raw_value!r}"
+                )
+            values[field_name] = float(raw_value)
+        if not values:
+            raise FinancialDataError(f"{end_date} 没有给出任何官方指标值")
+
+        unit = str(entry.get("unit") or "").strip()
+        if unit not in OFFICIAL_UNITS:
+            raise FinancialDataError(
+                f"{end_date} 必须写明金额单位（元 或 CNY），收到 {entry.get('unit')!r}；"
+                "单位不明时数字无法与其他口径对账"
+            )
+        code = str(entry.get("ts_code") or "").strip()
+        if not code:
+            raise FinancialDataError(
+                f"{end_date} 必须写明所属公司代码 ts_code；"
+                "同一份补录文件里混入别家公司是最难事后发现的错"
+            )
+        if code != symbol:
+            raise FinancialDataError(
+                f"{end_date} 的 ts_code={code} 与本次运行标的 {symbol} 不一致"
+            )
+        stamp_text = str(entry.get("available_at") or "").strip()
+        if not stamp_text:
+            raise FinancialDataError(
+                f"{end_date} 必须写明补录来源自身的披露时间 available_at；"
+                "不得沿用财报记录的公告时间，否则事后重述会冒充当时可得"
+            )
+        stamp = _parse_calendar_date(stamp_text)
+        if stamp is None:
+            raise FinancialDataError(
+                f"{end_date} 的 available_at 无法解析为日期：{stamp_text!r}"
+            )
+        if stamp < period_end:
+            raise FinancialDataError(
+                f"{end_date} 的 available_at={stamp} 早于报告期末 {period_end}，不可能成立"
+            )
+        if asof_date is not None and stamp > asof_date:
+            raise FinancialDataError(
+                f"{end_date} 的 available_at={stamp} 晚于本次基准日 {asof_date}；"
+                "基准日之后的披露不能算作当时可得"
+            )
+        if not (entry.get("url") or entry.get("source_file")):
+            raise FinancialDataError(
+                f"{end_date} 必须给出 url 或 source_file，说明数字抄自哪份公告"
+            )
+        checked[end_date] = {
+            "values": values,
+            "unit": OFFICIAL_UNITS[unit],
+            "ts_code": code,
+            "available_at": f"{stamp.isoformat()} 00:00:00",
+            "available_at_raw": stamp_text,
+            "url": entry.get("url"),
+            "source_file": entry.get("source_file"),
+            "location": entry.get("location"),
+        }
+    return {"periods": checked}
+
 
 def build_adjustments(
     *,
     series: QuarterSeries,
     official_metrics: dict[str, Any] | None = None,
+    tax_rate: float | None = None,
+    tax_rate_source: str = "default",
+    asof: str = "",
 ) -> dict[str, Any]:
     """Three separate earnings lines: reported, official deducted, adjusted.
 
     The adjusted scenario recomputes income tax at a single flat rate on the
     adjusted pretax profit and keeps the reported minority interest. Both are
-    assumptions of this scenario, not facts about the company.
+    assumptions of this scenario, not facts about the company. The rate is a
+    scenario input, recorded with the result, so changing it changes the
+    numbers and the report text through the same path.
     """
 
-    tax_rate = DEFAULT_ADJUSTMENT_TAX_RATE
-    official = (official_metrics or {}).get("periods", {})
+    if tax_rate is None:
+        tax_rate = DEFAULT_ADJUSTMENT_TAX_RATE
+    if not 0 < tax_rate < 1:
+        raise FinancialDataError(f"调整情景税率必须是 0~1 之间的小数，收到 {tax_rate!r}")
+    scenario_version = f"strip-impairment-flat-tax@{tax_rate:.4f}"
+    official = validate_official_metrics(
+        official_metrics, symbol=series.symbol, asof=asof
+    )["periods"]
 
     def _official_single(field_name: str) -> dict[str, float | None]:
         """Difference an official cumulative figure inside the same fiscal year."""
 
         cumulative: dict[str, float | None] = {
-            end_date: _number((official.get(end_date) or {}).get(field_name))
+            end_date: _number(((official.get(end_date) or {}).get("values") or {}).get(field_name))
             for end_date in official
         }
         single: dict[str, float | None] = {}
@@ -974,8 +1294,9 @@ def build_adjustments(
         tax = _single(record, "income_tax")
         parent = _single(record, "n_income_attr_p")
         official_row = official.get(record.end_date) or {}
+        official_values = official_row.get("values") or {}
         credit = credit_single.get(record.end_date)
-        credit_cumulative = _number(official_row.get("credit_impair"))
+        credit_cumulative = _number(official_values.get("credit_impair"))
         adjusted_asset = adjusted_asset_credit = None
         adjusted_reason: str | None = None
         # 统一税率情景重算所得税，但源表所得税缺失时无法核对“税前−所得税=净利润”
@@ -1000,10 +1321,16 @@ def build_adjustments(
                 "reported_parent_net": parent,
                 "official_deducted_parent_net_single": official_deduct_single.get(record.end_date),
                 "official_deducted_parent_net_cumulative": (
-                    _number(official_row.get("deduct_parent"))
+                    _number(official_values.get("deduct_parent"))
                 ),
                 "official_source_url": official_row.get("url"),
+                "official_source_file": official_row.get("source_file"),
                 "official_location": official_row.get("location"),
+                # The supplement's own disclosure time, never the statement
+                # record's announcement time.
+                "official_available_at": official_row.get("available_at"),
+                "official_unit": official_row.get("unit"),
+                "official_ts_code": official_row.get("ts_code"),
                 "credit_impairment_single": credit,
                 "credit_impairment_cumulative": credit_cumulative,
                 "asset_impairment": impairment,
@@ -1016,11 +1343,13 @@ def build_adjustments(
     return {
         "schema_version": SCHEMA_VERSION,
         "calc_rules_version": CALC_RULES_VERSION,
+        "scenario_version": scenario_version,
         "symbol": series.symbol,
         "scenario": {
-            "scenario_id": "strip-impairment-flat-tax",
+            "scenario_id": scenario_version,
             "label": "本次核对情景：剔除资产减值（可再剔除信用减值）",
             "tax_rate": tax_rate,
+            "tax_rate_source": tax_rate_source,
             "tax_treatment": "flat_rate_recompute",
             "minority_treatment": "fixed_reported_actual",
             "formula": "(利润总额 − 剔除项) × (1 − 税率) − 当季实际少数股东损益",
@@ -1038,6 +1367,12 @@ def build_adjustments(
             "not_sustainable_earnings": True,
         },
         "periods": rows,
+        "official_metrics_checked": {
+            "periods": sorted(official),
+            "fields": list(OFFICIAL_METRIC_FIELDS),
+            "available_at_source": "补录条目自带的来源披露时间",
+            "checked_against_asof": asof or None,
+        },
         "line_types": {
             "reported_parent_net": "报表归母：原披露值",
             "official_deducted_parent_net_single": (
@@ -1051,5 +1386,9 @@ def build_adjustments(
             "信用减值来自公司公告补录；本地利润表无该列时不假设其存在。",
             "资产减值与信用减值分列，避免同一损失被加回两次。",
             "公允价值变动与投资收益合计不等于套保损益；联营合营投资收益需单独列出。",
+            (
+                "官方补录每期自带 available_at（来源自身披露时点）、单位与公司代码，"
+                "已逐条核验且不得晚于本次基准日；财报记录的公告时间不会被沿用。"
+            ),
         ],
     }

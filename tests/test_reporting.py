@@ -571,3 +571,45 @@ def test_report_shows_missing_account_instead_of_inventing_sizes(tmp_path: Path)
     assert "未提供" in html
     assert "目标账户权重" in html
     assert "未设定" in html
+
+
+def test_business_section_is_built_from_business_claims(tmp_path: Path) -> None:
+    """Section 2 answers "how does it earn money" from claims, not role prose."""
+
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    (run_dir / "claims.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run",
+                "claims": [
+                    {
+                        "claim_id": "c-biz-1",
+                        "role_id": "fundamentals-analyst",
+                        "kind": "fact",
+                        "topic": "business",
+                        "statement": "收入主要来自阴极铜冶炼加工费与铜价价差，矿山自给率决定成本弹性",
+                        "supporting_evidence_ids": ["F-market-daily-close"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    build_report(run_dir, datapack)
+    markdown = (run_dir / "report.md").read_text(encoding="utf-8")
+    business = markdown.split("## 2. 公司如何赚钱")[1].split("## 3.")[0]
+    assert "阴极铜冶炼加工费" in business
+    assert "F-market-daily-close" in business
+    # The role's own prose is raw material in the appendix, never the answer.
+    assert "测试摘要" not in business
+    assert "测试摘要" in markdown
+
+
+def test_business_section_admits_when_no_business_claim_exists(tmp_path: Path) -> None:
+    _, run_dir, datapack = _make_project_and_run(tmp_path)
+    build_report(run_dir, datapack)
+    markdown = (run_dir / "report.md").read_text(encoding="utf-8")
+    business = markdown.split("## 2. 公司如何赚钱")[1].split("## 3.")[0]
+    assert "没有被回答" in business
+    assert "财务数字的变化不构成业务说明" in business

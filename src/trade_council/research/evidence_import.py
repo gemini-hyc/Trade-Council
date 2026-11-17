@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 EVIDENCE_FILE = "supplemental_evidence.json"
 LOG_FILE = "evidence_imports.jsonl"
+SOURCE_DIR = "supplement/sources"
 SCHEMA_VERSION = "1.0"
 VALID_TYPES = {"number", "text", "event", "boolean"}
 
@@ -76,19 +77,59 @@ def _stable_id(item: dict[str, Any]) -> str:
     return "S-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
+def _fingerprint(item: dict[str, Any]) -> str:
+    """What makes two imports the same evidence, ignoring bookkeeping fields."""
+
+    payload = {
+        key: item.get(key)
+        for key in (
+            "dataset_id",
+            "field",
+            "period",
+            "value",
+            "unit",
+            "source_url",
+            "source_file_sha256",
+            "location",
+            "available_at",
+        )
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _store_source(run_dir: Path, path: Path) -> str:
+    """Copy the source file under the run so the evidence stays verifiable."""
+
+    digest = _sha256_file(path)
+    target_dir = run_dir / SOURCE_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{digest[:16]}{path.suffix.lower()}"
+    if not target.is_file():
+        target.write_bytes(path.read_bytes())
+    return str(target.relative_to(run_dir))
+
+
 def _check_item(
     item: dict[str, Any],
     *,
     symbol: str,
     asof: str,
+    run_dir: Path,
+    reserved_ids: set[str],
 ) -> tuple[dict[str, Any], str]:
     """Return ``(normalised_item, "")`` or ``({}, reason)``."""
 
     evidence = dict(item)
     evidence_id = str(evidence.get("evidence_id") or "").strip()
+    if evidence_id and evidence_id in reserved_ids:
+        return {}, f"证据 ID {evidence_id} 已被数据包基础证据占用，补充证据不能覆盖或冒充它"
     dataset_id = str(evidence.get("dataset_id") or "").strip()
     if not dataset_id:
         return {}, "缺少 dataset_id"
+    evidence_symbol = str(evidence.get("symbol") or symbol).strip()
+    if evidence_symbol and evidence_symbol != symbol:
+        return {}, f"证据股票代码 {evidence_symbol} 与运行 {symbol} 不一致"
     value = evidence.get("value")
     value_type = str(evidence.get("value_type") or "").strip()
     if not value_type:
@@ -122,24 +163,28 @@ def _check_item(
         host = urlparse(url).scheme
         if host not in {"http", "https"}:
             return {}, f"source_url 必须是 http(s) 链接：{url}"
-    if not url and not str(evidence.get("source_file") or "").strip():
-        return {}, "缺少 source_url 或 source_file，无法定位来源"
-    evidence_symbol = str(evidence.get("symbol") or symbol).strip()
-    if evidence_symbol and evidence_symbol != symbol:
-        return {}, f"证据股票代码 {evidence_symbol} 与运行 {symbol} 不一致"
     file_path = str(evidence.get("source_file") or "").strip()
+    if not url and not file_path:
+        return {}, "缺少 source_url 或 source_file，无法定位来源"
+    if url and not str(evidence.get("location") or "").strip():
+        return {}, f"URL 证据缺少 location（页码/表格/章节），无法复核：{url}"
     if file_path:
         path = Path(file_path).expanduser()
-        if path.is_file():
-            evidence["source_file_sha256"] = _sha256_file(path)
-        else:
-            evidence.pop("source_file_sha256", None)
+        if not path.is_file():
+            return {}, f"source_file 不存在：{file_path}；不能保存没有来源定位的证据"
+        try:
+            path.read_bytes()[:1]
+        except OSError as exc:
+            return {}, f"source_file 不可读：{file_path}（{exc}）"
+        evidence["source_file"] = str(path)
+        evidence["source_file_sha256"] = _sha256_file(path)
+        evidence["source_copy"] = _store_source(run_dir, path)
     material = str(evidence.get("material") or "").strip()
     if material:
         # Web page text is data, never an instruction to the agent.
         evidence["quoted_text"] = material[:2000]
         evidence["text_trust"] = "untrusted_source_text"
-    evidence.pop("source_file", None)
+    evidence.pop("material", None)
     evidence["symbol"] = evidence_symbol or symbol
     evidence["value_type"] = value_type
     evidence["source_level"] = str(evidence.get("source_level") or "external")
@@ -154,11 +199,13 @@ def import_evidence(
     symbol: str,
     asof: str,
     source_label: str = "",
+    reserved_ids: set[str] | None = None,
 ) -> ImportResult:
     """Validate and persist a batch of supplementary evidence.
 
-    Duplicates are detected on the resolved evidence id; an existing id is kept
-    as-is so that repeated imports cannot inflate counts or overwrite values.
+    A repeated identical import is a duplicate; an id that already exists with
+    different content is a conflict and is rejected, because silently keeping
+    the first version would hide a corrected number.
     """
 
     items = payload.get("items") if isinstance(payload, dict) else payload
@@ -184,13 +231,31 @@ def import_evidence(
         if not isinstance(raw, dict):
             result.rejected.append({"reason": "item 必须是对象", "value": str(raw)[:80]})
             continue
-        evidence, reason = _check_item(raw, symbol=symbol, asof=asof)
+        evidence, reason = _check_item(
+            raw,
+            symbol=symbol,
+            asof=asof,
+            run_dir=run_dir,
+            reserved_ids=reserved_ids or set(),
+        )
         if reason:
             result.rejected.append({"reason": reason, "dataset_id": str(raw.get("dataset_id") or "")})
             continue
         evidence_id = str(evidence["evidence_id"])
         if evidence_id in existing:
-            result.duplicates.append(evidence_id)
+            previous = existing[evidence_id]
+            if _fingerprint(previous) == _fingerprint(evidence):
+                result.duplicates.append(evidence_id)
+            else:
+                result.rejected.append(
+                    {
+                        "reason": (
+                            f"证据 ID {evidence_id} 已存在但内容不同（来源或数值冲突），"
+                            "请换一个明确的 evidence_id 并说明两者差异"
+                        ),
+                        "dataset_id": str(evidence.get("dataset_id") or ""),
+                    }
+                )
             continue
         evidence["import_batch_id"] = result.batch_id
         existing[evidence_id] = evidence
@@ -209,6 +274,16 @@ def import_evidence(
         "added": result.added,
         "duplicates": result.duplicates,
         "rejected": result.rejected,
+        "stored_sources": [
+            {
+                "evidence_id": evidence_id,
+                "source_file": existing[evidence_id].get("source_file"),
+                "source_file_sha256": existing[evidence_id].get("source_file_sha256"),
+                "source_copy": existing[evidence_id].get("source_copy"),
+            }
+            for evidence_id in result.added
+            if existing.get(evidence_id, {}).get("source_copy")
+        ],
     }
     with (run_dir / LOG_FILE).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(log_entry, ensure_ascii=False) + "\n")

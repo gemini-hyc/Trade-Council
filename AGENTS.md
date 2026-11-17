@@ -38,13 +38,16 @@
 | `agents/phase*/<role>.json` | 角色产物，字段受 Schema 约束 | 当前 agent |
 | `decision.json` | 最终裁决（FinalDecision） | 当前 agent |
 | `research_questions.json` | 决定性问题、已尝试路径、状态 | 当前 agent |
-| `claims.json` | 论点、类型、状态、依赖 | 当前 agent |
+| `claims.json` | 论点、类型、`topic`、状态、依赖 | 当前 agent |
 | `research_decision.json` | 基本面/估值/时机判断 + 执行状态 | 当前 agent |
 | `data_gaps.json` | 缺口分类（未取成/未披露/过期/不适用） | 当前 agent |
 | `trading_rules.json` | 结构化规则树与减仓批次（可选） | 当前 agent |
-| `revisions.jsonl` | 修订与失效传播记录 | `research revise` |
+| `revisions.jsonl` | 修订与失效传播记录（`reviewed` 由队列推导） | `research revise` / `research review` |
 | `supplemental_evidence.json` | 补证（含来源定位与文件哈希） | `research import-evidence` |
-| `validation.json` / `finalize.json` | 机器校验与封存记录 | `validate` / `finalize` |
+| `supplement/sources/` | 补证来源文件的受控副本（文件名含 sha256 前缀） | `research import-evidence` |
+| `recompute/<scenario_id>/` | 运行级重算产物（税率/官方补录情景） | `research recompute` |
+| `submit.json` | 提交检查记录 | `submit` |
+| `validation.json` / `finalize.json` | 机器校验与 `seal-1` 封存记录 | `validate` / `finalize` |
 | `report_view.json` | 报告的唯一数据来源 | `finalize` |
 
 ## 开发检查

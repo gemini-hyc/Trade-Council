@@ -1,195 +1,136 @@
-# 完善计划实施验收记录
+# 实施验收记录（T00–T07 返工版）
 
-日期：2026-11-17。计划来源：`Trade-Council完善实施计划.md`（T00–T07）。
-基线：HEAD `bdb38ab`，86 项测试通过，ruff / mypy 通过。
+日期：2026-11-17（返工）。首次验收记录见 git 历史（提交 `9da1b75` 版本的本文件）。
+计划来源：`Trade-Council完善实施计划.md`（T00–T07）。
+返工依据：`验收复核与返工清单.md`（R1–R8 + 第 4 节 5 项补充验收）。
+
+本轮原则（来自返工清单）：每一项先加入能在返工前 HEAD 失败的回归用例，再修实现；
+不删除旧测试；不把 FAIL 改 WARN 通过；不扩展到 M4（Chan、宏观接口）。
 
 ## 0. 结论摘要
 
-- 完成 T00–T07，共 144 项测试通过，ruff 与 mypy（61 源文件）通过。
-- 两家公司的正式路径都已跑通：江西铜业（600362.SH）与扬农化工（600486.SH），
-  均完成 `analyze → 当前 agent 分析 → validate PASS → finalize PASS`。
-- 未做：接入 Chan 候选、宏观仓位接口、回测、批量选股（计划 M4，本轮范围外）。
-- 未解决的真实研究问题已在两份报告里逐条登记（见 §5）。
-- GitHub 同步状态见 §7。
+- R1–R8 全部修复，逐条用例与结果见 §1；第 4 节 5 项补充验收见 §2。
+- 测试 144 → 191 项（新增 47 项，其中 `tests/test_rework_acceptance.py` 32 项为 R1–R8 的专用回归）。
+  `ruff check .` 全通过，`mypy src` 62 个源文件全通过。
+- 两家公司重做了一轮完整循环（新运行目录，旧运行保留为历史）：
+  江西铜业 `runs/jxc-20261117`、扬农化工 `runs/yn-20261117`，
+  各完成「正式分析 → 补证导入 → 运行级重算 → 论点修订 → 逐条复核 → 重新封存 → 重新导出」。
+- 两份新报告：`reports/江西铜业-20261113.html`、`reports/扬农化工-20261113.html`。
+- 仍然未解的真实问题留在报告与缺口清单里（§4），没有为了让报告好看而消掉。
 
-## 1. 任务清单
+## 1. R1–R8 逐条结论
 
-| ID | 任务 | 状态 | 提交 |
-|---|---|---|---|
-| T00 | 基线、兼容与实施纪律 | 完成 | （工作区记录，见 `docs/implementation/baseline.md`） |
-| T01 | 先修会误导研究的确定性错误 | 完成 | `71ea7f6` |
-| T02 | 冻结输入与统一完成入口 | 完成 | `0192918` |
-| T03 | 财务底座正式模块（单季/桥接/三类盈利） | 完成 | `5a3090c` |
-| T04 | 问题驱动补证、缺口分类、论点修订传播 | 完成 | `b8aa60c` |
-| T05 | 研究判断、技术时机与账户动作分离 | 完成 | `b8aa60c`、`9097d49` |
-| T06 | 报告由同一份结构化结果生成 | 完成 | `14effa5` |
-| T07 | 验收样例、错误用例、文档与同步 | 完成（同步见 §7） | `9097d49`、`e697417`、本次文档提交 |
+| 编号 | 复核指出的问题 | 返工做法 | 回归用例 | 结果 |
+|---|---|---|---|---|
+| R1 | 正常准备状态没有合法完成入口 | 完成判定改为看产物；新增 `submit` 子命令（校验角色产物 + decision + 三份研究文件后推进 `DECIDED`） | `test_rework_acceptance.py::test_prepared_run_completes_without_hand_editing_status`、`test_submit_names_what_is_missing` | 通过 |
+| R2 | 数据或结论变化后旧报告仍能正式导出 | 新增 `seal-1` 封存（37 项依赖：输入绑定、角色产物、研究文件、revisions、规则树、账户上下文、重算产物）；`export` 前 `verify_seal`，失败拒绝；`--historical` 显式导出并标注文件名 | `test_export_refuses_when_frozen_input_changed`、`test_export_refuses_when_a_conclusion_or_claim_changed`（4 例）、`test_export_refuses_when_account_context_changed` | 通过 |
+| R3 | 三份研究文件可全缺，严格 Schema 未接入 | 三份文件改为必需（`RESEARCH_FILE_MISSING`），真正调用 `QuestionSet`/`ClaimSet`/`ResearchDecision`；查 run_id/revision_id 一致、重复 ID、未知依赖/问题；旧运行走 legacy 路径并 WARN | `test_missing_role_fails_and_names_it`、`test_research_file_is_required`、`test_misspelled_claim_field_fails`、`test_legacy_run_warns_instead_of_failing` | 通过 |
+| R4 | 账户未知仍可 actionable | `Field`→依赖映射（`target_account_weight`→资本/持仓等），能力位由 `TradeContext` 推导；买卖方向字段不混用；新旧仓位一致性；`cash_amount` 有限正数；未知 `requires` 直接失败 | `test_unknown_account_cannot_be_actionable`、`test_sell_fraction_cannot_use_target_weight`、`test_position_source_conflict`、`test_unknown_requires_is_rejected`、`test_blocked_plan_may_declare_its_missing_inputs` | 通过 |
+| R5 | 未复核输出与失效论点仍可作为有效结论 | 逐项 `pending_reviews`（`output@revision`），一次复核只销一条；未复核输出对应维度必须降级为 `unresolved` 并移除 `valuation_reference` | `test_unreviewed_valuation_cannot_be_published`、`test_one_review_cannot_clear_another_pending_output`、`test_review_must_name_an_existing_revision`、`test_revision_requires_affected_outputs` | 通过 |
+| R6 | 不存在的来源也能入库，路径被丢弃 | 来源文件必须存在可读；复制到 `supplement/sources/<sha16>.<ext>` 并记哈希；URL 证据必须给 `location`；同 ID 不同内容判冲突；不得占用基础证据 ID | `test_missing_source_file_is_rejected`、`test_existing_source_file_is_copied_and_hashed`、`test_url_evidence_needs_a_location`、`test_same_id_with_different_content_is_a_conflict`、`test_supplement_cannot_take_over_a_pack_evidence_id` | 通过 |
+| R7 | 简单年化 ROE 混用单季利润与累计月份 | 两口径分列：累计 `YTD归母 ÷ 期末净资产 × 12/月数`，单季 `单季归母 ÷ 期末净资产 × 4`；摘要与报告同步改名 | `test_roe_uses_matching_numerator_and_annualisation`（Q1/Q2/Q3 断言 0.40/0.40、0.60/0.80、0.80/1.20） | 通过 |
+| R8 | 重述保护未贯通真实入口，23% 为常量 | `update_flag` 进入数据包；同期多版本统计与 `comparability`（confirmed/changed/unconfirmed）；TTM 继承窗口内最弱可比性；税率由 `--adjustment-tax-rate` / `research recompute` 输入并写入情景、manifest 与报告 | `test_build_artifacts_detects_a_restated_period`、`test_period_end_versions_are_counted`、`test_ttm_inherits_comparability`、`test_recompute_changes_adjusted_numbers_but_not_reported_ones`、`test_default_scenario_stays_23_percent_and_is_labelled`、`test_recompute_after_finalize_invalidates_the_seal`、`test_recompute_rejects_a_ratio_outside_zero_to_one` | 通过 |
 
-补充修复（实施过程中发现）：`e697417` 修可用时点跨格式比较与数据包哈希自指。
+返工过程中另外修掉的两个真实缺陷（不是清单条目，但会直接影响结论）：
 
-## 2. T01 修掉的确定性错误
+1. `blocked` 执行方案只要声明了 `requires` 就判 FAIL，等于惩罚「诚实声明缺什么」。
+   改为：只有在已经给出仓位数字、或状态写成 `actionable` 时才 FAIL，否则 WARN。
+2. 修订明细一直显示「复核=未完成」，即使所有输出与角色都已复核。改为按待审队列
+   重新推导 `reviewed`，并在 `finalize` 写报告前校正（`reconcile_revisions`）。
 
-| 问题 | 修法 | 验证 |
+## 2. 第 4 节补充验收
+
+| 缺口 | 本轮做法 | 证据 |
 |---|---|---|
-| 均线升序被标“完全多头” | 逐对严格相邻比较；相等/缺值/方向翻转 → 混合或不可判；文案比较符随方向变化 | `tests/test_deterministic_fixes.py`、`test_indicators.py` |
-| ROE 混称官方加权 ROE | 改名“期末净资产口径简单年化 ROE 估算”，写明不是官方值 | 同上 |
-| 现金流/归母“>100% 即健康” | 分母口径分别说明，去掉健康结论 | 同上 |
-| 价格口径未声明 | 摘要与报告都标“未复权/前复权”及用途 | 同上 |
-| 固定风险雷达 + 无定义综合分 | 删除固定雷达；只有显式评分卡（权重/公式/缺失处理）才出分 | `test_deterministic_fixes.py::test_no_scorecard_no_radar` |
-| 文本证据进 float 比对、缺失显示 0 | `value_type` 类型化，文本渲染为 `evidence-text` | `test_reporting.py`、审计层 |
-| 审计 FAIL 仍标 AUDITED 并交付 | FAIL 只写 `report.draft.*`，状态 `AUDIT_FAILED` | `test_reporting.py` |
+| 1. 两个真实 run 没有补证/修订记录 | 两家公司各跑一轮完整循环，命令与产物见 §3 | `runs/*/evidence_imports.jsonl`、`revisions.jsonl`、`supplement/sources/` |
+| 2. 缺运行级重算入口 | 新增 `research recompute` → `recompute/<scenario_id>/`，冻结包不改，写 `run.financial_override`，报告与校验从新目录读数 | 江西铜业税率 23%→25%、扬农化工 23%→15%，调整后归母均发生变化（§3） |
+| 3. 官方补录缺公司/期间/单位/可得时间校验 | 新增 `validate_official_metrics`：`ts_code` 必须等于运行标的、`unit` 必须是元/CNY、`available_at` 必填且不得早于期末、不得晚于基准日、必须给 `url` 或 `source_file`；数据包的官方证据改用补录自带的披露时间，不再沿用财报记录 | `test_official_supplement_must_state_its_own_available_at`、`test_official_supplement_cannot_be_known_after_the_asof`、`test_official_supplement_needs_a_unit_and_a_matching_company`、`test_official_supplement_timestamp_overrides_the_statement_stamp` |
+| 4. 报告「公司如何赚钱」仍是财务复述 | 该章节改由 `topic=business` 的论点生成；没登记业务论点时明确写「没有被回答」，不再用财务环比顶替。两份报告各补了一个真能补齐的问题 | 江西铜业补回购预案金额（3 亿~5 亿元等）；扬农化工补原药/制剂拆分与原料价格，关掉 `product_mix` 缺口 |
+| 5. 角色摘要与中央 claims 双源 | 报告正文只引用中央论点表；角色摘要降为附录原始记录并标注引用关系；角色引用的 claim 必须存在（`ROLE_CLAIM_UNKNOWN`）；修订后受影响角色进入 `pending_role_reviews`，未重审则 `finalize` 不通过；`research review --role` 逐条关闭 | `test_business_section_is_built_from_business_claims`、`test_business_section_admits_when_no_business_claim_exists`、`test_role_summary_cannot_cite_a_claim_that_does_not_exist`、`test_revision_puts_the_claim_roles_into_review`、`test_revision_counts_as_reviewed_only_after_every_queue_is_closed` |
 
-## 3. T02 冻结与完成入口
+官方补录校验的一个限定说明：江西铜业样例里补录自带的 `available_at`（2026-04-29 /
+08-26 / 10-29）与该期财报记录的公告日恰好相同，所以在真实数据上「是否沿用」看不出差别；
+字段独立性由单元测试用不同日期证伪（`test_official_supplement_timestamp_overrides_the_statement_stamp`）。
 
-- `data/snapshot.py`：`snapshot_files.json` 逐文件 sha256 + `content_hash`；`snapshot.json`/
-  `manifest.json`/`snapshot_files.json` 不进内容哈希（避免自指）。
-- `orchestration/current_agent.py`：`input_binding`（snapshot/content_hash/manifest 哈希/
-  prompt 哈希/calc_rules_version），`resume` 逐项比对。
-- `cli.py`：`validate` / `finalize` 两个子命令；`report --datapack` 变可选；
-  外部数据包按 `<snapshot>-adopted` 落盘，不再覆盖 `runs/datapacks/<code>`。
-- 数据包生成后自校验：江西铜业与扬农化工均 `verify() == []`。
+## 3. 两家公司的真实循环
 
-## 4. T03 财务模块
+### 3.1 江西铜业 600362.SH（`runs/jxc-20261117`，snapshot `faa74adab93b5b41`）
 
-`engineering/financials.py`（`CALC_RULES_VERSION=financials-1`）：
-
-- 单季差分仅在同年度相邻季进行；缺上一季 → `missing_predecessor`，不倒推；
-  重述版本不一致 → `restated_incomparable`；存量科目不差分。
-- 盈利桥接三条线（利润总额/净利润/归母）1 元绝对容差，未单列项目留 `unlisted_net` 残差。
-- 三类盈利分列：报表归母、官方扣非（公告累计按季差分）、分析调整情景。
-- 调整情景：23% 统一税率 + 固定实际少数股东；利润总额/资产减值/少数股东/所得税
-  任一缺失 → 该季调整归母标不可得并记录 `adjusted_unavailable_reason`。
-
-江西铜业锚点复核（亿元，全部一致）：
-
-| 口径 | 2026Q1 | 2026Q2 | 2026Q3 |
-|---|---|---|---|
-| 报表归母 | 28.1756 | 58.1426 | 30.5474 |
-| 官方扣非（单季） | 31.2632 | 44.2987 | 26.8286 |
-| 剔资产减值情景 | 39.1235 | 69.7188 | 18.1666 |
-| 再剔信用减值情景 | 39.0302 | 69.9931 | 18.1773 |
-
-桥接对账 81 项通过、0 失败、0 不可得。
-
-## 5. T04 / T05 研究工作流
-
-- `research import-evidence`：校验股票/期间/单位/可得时点/来源定位，本地文件留 sha256，
-  未来数据直接拒绝，重复导入去重不累加，网页正文落库为不可信文本。
-- `research revise`：写 `revisions.jsonl`，依赖论点自动转 `unresolved`，
-  受影响输出进入 `pending_review_outputs`。
-- 缺口四分类 + 按数据类型时效规则（行情/财报/股东/质押/预告/新闻各不相同）。
-  关键缺口未解决时，受影响维度必须写 `unresolved`。
-- 执行语义：空仓不得输出卖出、比例必须在 0~1、未知可交易状态不得 `actionable`、
-  未复核修订前不得 `actionable`；规则树同 `rule_id` 冲突、成交量/成交额混用、
-  日线数据冒充 14:50 分时、减仓批次超 100% 全部失败。
-
-## 6. T06 报告
-
-`reporting/view_model.py` 生成唯一数据源，`report.md`、`report.html`、`report_view.json`
-同源渲染。主文 6 段，附录保留全部启用角色（本次 11 个）、多空论点、失效论点、
-更正记录、缺口与证据索引。无结构化估值参照时不给“合理价”；缺账户资金显示“未提供”。
-
-## 7. 两家公司实跑
-
-| 项目 | 江西铜业 600362.SH | 扬农化工 600486.SH |
+| 步骤 | 命令 | 结果 |
 |---|---|---|
-| 运行目录 | `runs/jxc-20261113/` | `runs/yn-20261113/` |
-| 快照 | `8ea685a82e90b684` | （见 run.json） |
-| 校验 | `validate` PASS（1 WARN：q1 未决） | `validate` PASS（1 WARN：q1 未决） |
-| 封存 | `finalize` FINALIZED，audit PASS | `finalize` FINALIZED，audit PASS |
-| 交付物 | `reports/江西铜业-20261113.html` | `reports/扬农化工-20261113.html` |
-| 结论 | HOLD／观察，执行 blocked | HOLD／观察，执行 blocked |
+| 建包（新补录 Schema） | `data 600362.SH --asof 2026-11-13 --out datapacks/jxc-20261117 --official-metrics configs/supplements/jxc-official.json` | 56 条证据，官方补录 3 期通过校验 |
+| 正式分析 | `analyze … --run-id jxc-20261117` → 写 11 个角色 + 4 份研究文件 | `submit` → `DECIDED` |
+| 首版交付 | `validate` → `finalize` → `export` | PASS（2 WARN）／FINALIZED／`reports/江西铜业-20261113.html` |
+| 补证 | `research import-evidence`（巨潮 2026-11-12 回购预案 PDF） | 新增 4 条，PDF 复制为 `supplement/sources/5ea9d0c94a181118.pdf` 并留 sha256 |
+| 封存失效 | 补证后立刻 `export` | 被拒：`封存后新增了依赖：supplemental_evidence.json` |
+| 运行级重算 | `research recompute`，税率 23%→25% | Q3 调整后归母 18.17 → 17.53 亿元；数据包未改 |
+| 修订 r2 / r3 | `research revise`：`c-odds` 降级、新增并降级 `c-buyback-signal` | 待复核输出 valuation/timing + 角色重审队列 |
+| 复核 | `research review`（valuation、timing、aggressive-risk-analyst、bull-researcher） | 全部关闭，修订明细显示「复核=已完成」 |
+| 重新交付 | `validate` → `finalize` → `export` | PASS／FINALIZED，seal `8ecf6b7c9fc7…`（37 项依赖） |
 
-江西铜业验收事实（计划 11.1 B）：
+本轮补上的问题：q4「回购预案金额/价格上限/股数」从「未知」变为已答——
+3 亿~5 亿元、价格上限 56.34 元/股、532.48 万~887.47 万股（占总股本 0.15%~0.26%）、
+期限 3 个月、自有资金。据此把「回购提供赔率优势」降级：上限只占市值 0.46%。
 
-- Q3 单季毛利率 3.60% < Q2 6.45%，归母环比 -47.46%，毛利额减少 59.61 亿元。✓
-- Q3 资产减值 +10.80 亿元为转回，是缓冲项而非下滑原因。✓
-- 报告明确写“调整后单季利润不是可持续年利润，不得乘以 4 年化”。✓
-- 账户未知 → 无任何仓位/目标价数字，执行状态 blocked。✓
+### 3.2 扬农化工 600486.SH（`runs/yn-20261117`，snapshot `96ac30b902e04652`）
 
-第二家公司验证的“无硬编码 + 局部降级”：
-
-- 官方扣非数据集对该股零记录，报告如实显示“缺失”，其余分析照常完成。✓
-- 该公司无历史业绩预告记录，缺口按 `NOT_EXTRACTED` 记录并写明检查范围。✓
-- 同一套代码与流程，未出现股票代码特判。✓
-
-## 8. 错误用例 A01–A18
-
-| ID | 覆盖位置 | 断言要点 |
+| 步骤 | 命令 | 结果 |
 |---|---|---|
-| A01 | `test_finalization.py::test_missing_role_fails_and_names_it`、`test_unknown_role_field_fails` | 报出角色名与拼错字段 |
-| A02 | `test_tampered_datapack_blocks_reuse` | `INPUT_TAMPERED`，禁止复用旧结论 |
-| A03 | `test_financials.py`（缺 Q2） | 单季不可得，不差出六个月 |
-| A04 | `test_financials.py`（重述） | `restated_incomparable` |
-| A05 | `test_finalization.py::test_future_evidence_fails` | `EVIDENCE_FUTURE` |
-| A06 | `test_financials.py`（存量科目） | 不做差分 |
-| A07 | `test_acceptance_cases.py::test_a07_*` | 不重复剔除；缺少数股东 → 不可得 |
-| A08 | `test_research.py::test_revision_propagates_*`、`test_acceptance_cases.py::test_a08_*` | 撤回传播 + 旧目标价不得沿用 |
-| A09 | `test_deterministic_fixes.py`（文本证据） | 文本按文本渲染 |
-| A10 | `test_acceptance_cases.py::test_a10_*` | `expected_return` 被 Schema 拒绝 |
-| A11 | `test_acceptance_cases.py::test_a11_*` | `RULE_CONFLICT` / `INDICATOR_MISMATCH` |
-| A12 | `test_acceptance_cases.py::test_a12_*` | 40/25/25/10 通过，105% `TRANCHE_OVERFLOW` |
-| A13 | `test_acceptance_cases.py::test_a13_*` | `RULE_NEEDS_INTRADAY`，不许 actionable |
-| A14 | `test_acceptance_cases.py::test_a14_*` | 缺 capital 仍 PASS，仓位不生成 |
-| A15 | `test_acceptance_cases.py::test_a15_*` | 股息假设 WARN，确定现金流字段被拒 |
-| A16 | `test_finalization.py::test_export_requires_finalized_report` | 未 FINALIZED 时 export 返回 2 |
-| A17 | `test_acceptance_cases.py::test_a17_*` | 不实例化 provider，无 `llm_calls.jsonl` |
-| A18 | `test_acceptance_cases.py::test_a18_*` | 重复 finalize 哈希一致、无重复追加 |
+| 建包 | `data 600486.SH --asof 2026-11-13 --out datapacks/yn-20261117` | 50 条证据（该股无官方补录，报告如实显示缺失） |
+| 正式分析 | `analyze … --run-id yn-20261117` | `submit` → `DECIDED` |
+| 首版交付 | `validate` → `finalize` → `export` | PASS／FINALIZED／`reports/扬农化工-20261113.html`；第 2 节写明「毛利率下滑是价格还是成本无法判断」 |
+| 补证 | `research import-evidence`（2026-10-27 主要经营数据公告） | 新增 6 条：原药/制剂收入、销量、均价 + 两种主要原料价格 |
+| 重算 | `research recompute`，税率 23%→15%（实际有效税率 14.87%/15.47%） | Q3 调整后归母 2.273 → 2.509 亿元 |
+| 修订 r2 | `research revise`：撤回「无法判断」论点 | 待复核输出 fundamental + 角色重审 |
+| 复核 | `research review`（fundamental、fundamentals-analyst） | 全部关闭 |
+| 重新交付 | `validate` → `finalize` → `export` | PASS／FINALIZED，seal `1f6460c91911…` |
 
-## 9. 检查结果
+本轮补上的问题：q1「毛利率下滑是价格还是成本」有了直接证据——原药均价同比
++2.77%、制剂 +10.62%（售价在涨），氯化亚砜 +117.27%、氢溴酸 +38.92%、
+异戊二烯 +12.82%（成本在涨），液碱 -20.22%、一氯甲烷 -10.50% 部分对冲；
+`product_mix` 缺口随之关闭。
 
-```
-144 passed
-ruff check .        All checks passed!
-mypy src            Success: no issues found in 61 source files
-```
+历史版本导出在隔离副本上验证（不改生产 run）：改动 `claims.json` 一行后，
+`export` 返回 2 并指出「封存后内容已变化：claims.json」；加 `--historical` 后
+导出为 `江西铜业-20261113-已封存历史版本.html` 并给出 warning。
 
-基线对照：86 → 144 项测试（新增 58 项）。
+## 4. 仍未解决的事（不是本轮缺陷）
 
-## 10. 实际缺口与后续事项
+1. 江西铜业分部毛利（矿山/冶炼/副产品）本地库没有字段，只能从三季报附注取，
+   仍是 `NOT_EXTRACTED`；报告第 2 节明确写了「这是本节最主要的未知」。
+2. 江西铜业 2025 年及以前的官方扣非未补录；扬农化工官方扣非完全未补录，
+   因此「官方扣非」列对该股显示缺失。
+3. 两家公司的最新业绩预告未联网核实（本地最新记录停在 2026-07-09），按
+   `NOT_EXTRACTED` 记录并写明检查范围，未写成「源侧未披露」。
+4. 江西铜业 `TTM comparability=unconfirmed`：本地库每期只有一个披露版本，
+   无法证明与当时披露一致，报告随文标注了这一点。
 
-仍未解决（已在报告内登记，不是本轮缺陷）：
+## 5. 保留的 T00–T07 结论
 
-1. 江西铜业 q1（毛利率是否见底）、q2（分部毛利拆分）、q3（减值转回可持续性）未决；
-   分部报告本地库无字段，需从三季报附注取。
-2. 两家公司都缺最新业绩预告核实（本地数据到 2026-10-30，个股级记录陈旧或为零），
-   本轮未联网，按要求标为 `NOT_EXTRACTED`，不是“源侧未披露”。
-3. 江西铜业 2025 年及以前官方扣非未补录；扬农化工官方扣非完全未补录，
-   因此“官方扣非”列显示缺失，相关分位比较只能停在报表口径。
+首次验收中已确认落实、本轮未回退的部分：数据包冻结与逐文件哈希、输入绑定与
+`resume` 比对、单季差分与三类盈利分列、缺口四分类与时效规则、执行语义约束、
+报告单一数据源（`report.md`/`report.html`/`report_view.json` 同源）、A01–A18 错误用例。
+其中被本轮推翻或改写的三处已在 §1 说明：完成入口（R1）、导出有效性（R2）、
+调整情景税率（R8，不再是固定 23%）。
 
-后续（计划 M4，本轮不做）：
-
-- T08A 接 Chan 候选（小接口，不扩成平台）。
-- T08B 宏观/仓位上限先手动输入，不由新闻分数自动生成仓位。
-- T09 轻量决策记录，不做回测平台。
-
-## 11. Git 与同步
-
-- 本地提交序列：`71ea7f6` → `0192918` → `5a3090c` → `b8aa60c` → `14effa5` → `9097d49` → `e697417` → 本次文档提交。
-- 远端同步：已完成（见 §12）。
-
-## 12. 同步结果
-
-第一次失败原因（已定位，非仓库问题）：
+## 6. 检查结果
 
 ```
-git fetch origin
-→ fatal: unable to access ...: Failed to connect to 127.0.0.1 port 58731
+pytest -q            191 passed
+ruff check .         All checks passed!
+mypy src             Success: no issues found in 62 source files
 ```
 
-`~/.gitconfig` 里 `http.proxy` 指向已失效的 `127.0.0.1:58731`，而当前会话的代理是
-`127.0.0.1:50013`；https 通道还缺少可非交互读取的凭证（osxkeychain 里没有该仓库条目）。
+测试分布：`test_rework_acceptance.py` 32 项（R1–R8 与第 4 节专项）、
+`test_financials.py` 21 项、`test_research.py` 19 项、`test_reporting.py` 17 项，
+其余为既有用例（未删除、未下调等级）。
 
-实际处理：改用 SSH 通道推送，未改 remote 配置、未强推、未改写历史：
+## 7. Git 与同步
 
-```
-git ls-remote git@github.com:gemini-hyc/Trade-Council.git   # 连通
-git push git@github.com:gemini-hyc/Trade-Council.git main:main
-→ bdb38ab..9da1b75  main -> main（快进）
-```
+- 本轮代码与文档提交见 §8（提交 ID 在推送后回填）。
+- 推送沿用 SSH 通道（`~/.gitconfig` 的 `http.proxy` 仍指向失效端口 58731，
+  属于本机配置问题，未改仓库配置、未强推）。
 
-`bdb38ab` 是本次实施前远端 HEAD，`9da1b75` 是本次全部代码与验收文档的提交。
-本条同步记录所在的文档提交在同一分支上，随后以同样方式推送。
+## 8. 同步结果
 
-遗留配置问题（不属于本次代码范围）：建议把 `~/.gitconfig` 的 `http.proxy` 改为当前
-代理端口或删除，并为 https 通道配置可用的凭证方式，否则后续 https 操作仍需改走 SSH。
+（推送后回填实际提交 ID 与远端 HEAD。）

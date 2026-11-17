@@ -32,6 +32,43 @@ def _datapack(tmp_path: Path) -> Path:
             "ma60": [98.0] * 10,
         }
     ).to_csv(pack / "price_daily.csv", index=False)
+    # Minimal but internally consistent cumulative income statement: the
+    # bridge checks (total profit / net income / parent net) must reconcile.
+    pd.DataFrame(
+        {
+            "ts_code": ["600362.SH"] * 3,
+            "ann_date": ["20260420", "20260820", "20261025"],
+            "end_date": ["20260331", "20260630", "20260930"],
+            "report_type": ["1", "1", "1"],
+            "revenue": [1000.0, 2200.0, 3300.0],
+            "oper_cost": [900.0, 1980.0, 3000.0],
+            "biz_tax_surchg": [10.0, 22.0, 33.0],
+            "sell_exp": [5.0, 11.0, 16.0],
+            "admin_exp": [5.0, 11.0, 16.0],
+            "rd_exp": [0.0, 0.0, 0.0],
+            "fin_exp": [0.0, 0.0, 0.0],
+            "fv_value_chg_gain": [0.0, 0.0, 0.0],
+            "invest_income": [0.0, 0.0, 0.0],
+            "assets_impair_loss": [-10.0, -25.0, -30.0],
+            "operate_profit": [70.0, 151.0, 205.0],
+            "non_oper_income": [0.0, 0.0, 0.0],
+            "non_oper_exp": [0.0, 0.0, 0.0],
+            "total_profit": [70.0, 151.0, 205.0],
+            "income_tax": [17.5, 37.75, 51.25],
+            "n_income": [52.5, 113.25, 153.75],
+            "minority_gain": [2.5, 3.25, 3.75],
+            "n_income_attr_p": [50.0, 110.0, 150.0],
+        }
+    ).to_csv(pack / "income.csv", index=False)
+    pd.DataFrame(
+        {
+            "ts_code": ["600362.SH"] * 3,
+            "end_date": ["20260331", "20260630", "20260930"],
+            "total_assets": [2000.0, 2100.0, 2200.0],
+            "total_liab": [800.0, 820.0, 840.0],
+            "total_hldr_eqy_exc_min_int": [1200.0, 1280.0, 1360.0],
+        }
+    ).to_csv(pack / "balancesheet.csv", index=False)
     (pack / "evidence.json").write_text(
         json.dumps(
             {
@@ -106,7 +143,11 @@ ROLE_PAYLOADS = {
 }
 
 
-def _make_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[object, Path, Path]:
+def _make_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    context: TradeContext | None = None,
+) -> tuple[object, Path, Path]:
     config = load_project_config(ROOT)
     config = replace(config, app=config.app.model_copy(update={"run_dir": str(tmp_path / "runs")}))
     monkeypatch.setattr(cli, "load_project_config", lambda _: config)
@@ -116,7 +157,7 @@ def _make_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[object, 
         config,
         pack,
         run_dir,
-        TradeContext(),
+        context or TradeContext(),
         mode="full",
         include_news=False,
         allow_web=False,
@@ -147,6 +188,20 @@ def _make_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[object, 
     (run_dir / "decision.json").write_text(
         json.dumps(ROLE_PAYLOADS["risk-manager"], ensure_ascii=False), encoding="utf-8"
     )
+    # Every role finding must resolve to a claim in the central list: the two
+    # texts are checked against each other, so the fixture files the claims the
+    # roles actually cite.
+    role_claims = [
+        {
+            "claim_id": f"{entry['role_id']}-c1",
+            "role_id": entry["role_id"],
+            "kind": "fact",
+            "statement": "收盘价 109 元",
+            "supporting_evidence_ids": ["F-market-daily-close"],
+        }
+        for entry in request["roles"]
+        if entry["role_id"] not in ROLE_PAYLOADS
+    ]
     (run_dir / "claims.json").write_text(
         json.dumps(
             {
@@ -166,6 +221,7 @@ def _make_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[object, 
                         "statement": "旧目标价依赖已撤回的假设",
                         "status": "retracted",
                     },
+                    *role_claims,
                 ],
             },
             ensure_ascii=False,
@@ -212,9 +268,8 @@ def _make_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[object, 
         ),
         encoding="utf-8",
     )
-    state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-    state["status"] = "DECIDED"
-    (run_dir / "run.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    # The run keeps the state the preparation step wrote: no test may hand-edit
+    # the completion flag, because that is exactly what a real user must not do.
     return config, run_dir, pack
 
 

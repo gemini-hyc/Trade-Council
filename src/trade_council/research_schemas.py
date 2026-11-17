@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 Priority = Literal["critical", "material", "minor"]
 ClaimKind = Literal["fact", "assumption", "inference"]
 ClaimStatus = Literal["intact", "weakened", "retracted", "unresolved"]
+ClaimTopic = Literal["business", "finance", "valuation", "timing", "risk", "other"]
 QuestionStatus = Literal["open", "answered", "unresolved"]
 ExecutionStatus = Literal["not_assessed", "blocked", "conditional", "actionable"]
 ValuationMethod = Literal[
@@ -47,6 +48,10 @@ class Claim(ResearchModel):
     role_id: str
     revision: int = 1
     kind: ClaimKind = "inference"
+    # Which question the claim answers. The report builds each section from the
+    # claims filed under its topic, so a section cannot be filled with a role's
+    # free-form prose that no claim backs.
+    topic: ClaimTopic = "other"
     statement: str
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     counter_evidence_ids: list[str] = Field(default_factory=list)

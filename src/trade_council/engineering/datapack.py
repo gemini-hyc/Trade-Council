@@ -40,7 +40,7 @@ from ..data.registry import DatasetRegistry
 from ..data.snapshot import freeze as freeze_snapshot
 from .evidence import EvidenceIndex
 from .events import append_event_digest, load_events, write_event_artifacts
-from .financials import CALC_RULES_VERSION, build_financial_artifacts
+from .financials import CALC_RULES_VERSION, build_financial_artifacts, simple_annualized_roe
 from .indicators import MA_WINDOWS, add_indicators, ma_alignment, main_net_amount
 
 BASE = Path(os.environ.get("QUANT_DATA", "~/quant-data")).expanduser()
@@ -257,6 +257,7 @@ def build(
     include_news: bool = False,
     data_root: Path | None = None,
     official_metrics_path: Path | None = None,
+    adjustment_tax_rate: float | None = None,
 ):
     global BASE, PROVIDER, DATA_CONTRACT_PATH, REG
     if data_root is not None:
@@ -448,6 +449,7 @@ def build(
     # ---------- 6. 财务三表 ----------
     # 利润表只取原库已有的列；缺列不假设存在，由 DataNeed 补录。
     INC_COLS = ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type",
+                "update_flag",
                 "basic_eps", "diluted_eps", "total_revenue", "revenue", "oper_cost",
                 "biz_tax_surchg", "sell_exp", "admin_exp", "rd_exp", "fin_exp",
                 "fv_value_chg_gain", "invest_income", "ass_invest_income",
@@ -549,6 +551,7 @@ def build(
             cashflow=fin["cashflow"],
             balance=fin["balancesheet"],
             official_metrics=official_metrics,
+            adjustment_tax_rate=adjustment_tax_rate,
         )
         if fin_artifacts.get("status") == "ok":
             checks = fin_artifacts["checks_summary"]
@@ -1152,18 +1155,19 @@ def build(
                     note="单季推导值；不是原披露累计数",
                 )
         adv = fin_artifacts.get("adjustments", {})
-        available_by_end = {
-            record.end_date: record.available_at for record in series.records
-        }
         for row in adv.get("periods", []):
             if row.get("official_deducted_parent_net_cumulative") is None:
                 continue
+            # The supplement states when its own source became public. Falling
+            # back to the statement record's announcement time would make a
+            # later restatement look knowable on the as-of date.
+            official_stamp = row.get("official_available_at") or f"{asof} 23:59:59"
             evidence.add(
                 dataset_id="financial.official",
                 path="financial_adjustments.json",
                 primary_key=ts_code,
                 event_date=row["end_date"],
-                available_at=available_by_end.get(row["end_date"]) or f"{asof} 23:59:59",
+                available_at=str(official_stamp),
                 field="official_deducted_parent_net_cumulative",
                 value=float(row["official_deducted_parent_net_cumulative"]),
                 unit="CNY",
@@ -1234,6 +1238,8 @@ def build(
             "adjustments": ("financial_adjustments.json"
                             if (out_dir / "financial_adjustments.json").exists() else None),
             "checks_summary": fin_artifacts.get("checks_summary"),
+            "adjustment_scenario": (fin_artifacts.get("adjustments") or {}).get("scenario"),
+            "scenario_version": (fin_artifacts.get("adjustments") or {}).get("scenario_version"),
         },
         bars=len(px), datasets=REG.items,
         files=sorted(p.name for p in out_dir.glob("*") if p.is_file()),
@@ -1515,8 +1521,8 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
                 if pd.notna(ta) and pd.notna(tl) and ta:
                     lev_by_end[str(r["end_date"])] = tl / ta
         A("| 报告期 | 单季营收(亿) | 单季归母(亿) | 单季毛利率 | 单季归母净利率 | "
-          "ROE估算(简单年化) | 资产负债率(期末) | 单季经营现金流(亿) | 季度状态 |")
-        A("|---|---|---|---|---|---|---|---|---|")
+          "ROE估算(累计年化) | ROE估算(单季×4) | 资产负债率(期末) | 单季经营现金流(亿) | 季度状态 | 可比性 |")
+        A("|---|---|---|---|---|---|---|---|---|---|---|")
         for rec in records:
             def qv(field):
                 cell = rec.values.get(field)
@@ -1528,26 +1534,36 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
             nm = qni / qrev if qni is not None and qrev else None
             eq_cell = rec.values.get("total_hldr_eqy_exc_min_int")
             eq = eq_cell.cumulative if eq_cell is not None else None
-            roe_est = qni / eq * (12 / (rec.quarter * 3)) if (qni is not None and eq) else None
+            roe = simple_annualized_roe(rec, eq)
             lev = lev_by_end.get(rec.end_date)
             cash = qv("n_cashflow_act")
             status = "正常" if rec.status == "ok" else f"{rec.status}：{rec.reason}"
+            comparability = {
+                "confirmed": "已确认同版本",
+                "changed": "存在重述版本",
+                "unconfirmed": "单版本未确认",
+            }.get(rec.comparability, rec.comparability)
             A(f"| {rec.end_date} | {fmt(qrev/1e8) if qrev is not None else '—'} | "
               f"{fmt(qni/1e8) if qni is not None else '—'} | "
               f"{pct(gm) if gm is not None else '—'} | {pct(nm) if nm is not None else '—'} | "
-              f"{pct(roe_est) if roe_est is not None else '—'} | "
+              f"{pct(roe['ytd_value']) if roe['ytd_value'] is not None else '—'} | "
+              f"{pct(roe['single_quarter_value']) if roe['single_quarter_value'] is not None else '—'} | "
               f"{pct(lev) if lev is not None else '—'} | "
-              f"{fmt(cash/1e8) if cash is not None else '—'} | {status} |")
+              f"{fmt(cash/1e8) if cash is not None else '—'} | {status} | {comparability} |")
         A("")
         A("**口径定义（可直接复算）：**")
         A("")
         A("- 单季营收 = 本期累计营业收入 − 上一季累计营业收入；Q1 单季 = Q1 累计。")
         A("- 单季毛利率 = (单季营业收入 − 单季营业成本) ÷ 单季营业收入。")
         A("- 单季归母净利率 = 单季归母净利润 ÷ 单季营业收入。")
-        A("- **期末净资产口径简单年化 ROE 估算** = 单季归母净利润 ÷ 期末归母净资产 "
-          "× (12 ÷ 报告期月数)。这是估算，**不是公司披露的加权平均净资产收益率**；"
-          "官方加权 ROE 必须单列来源与期间，不能用 PB/PE 隐含比值代替。")
+        A("- **ROE估算（累计年化）** = 年初至本期累计归母净利润 ÷ 期末归母净资产 "
+          "× (12 ÷ 累计报告月数)。分子是累计数，所以年化系数用 12 除以已过月数。")
+        A("- **ROE估算（单季×4）** = 单季归母净利润 ÷ 期末归母净资产 × 4。"
+          "分子只有一个季度，年化系数只能是 4，不能再用 12 ÷ 报告期月数。"
+          "两种口径不能互相替代，也不能称为公司披露的加权平均 ROE。")
         A("- 资产负债率 = 期末负债总额 ÷ 期末资产总额（时点存量，不做单季差分）。")
+        A("- 可比性：`unconfirmed` 表示本地库每期只有一个披露版本，无法证明与当时披露一致；"
+          "`changed` 表示同一期间出现过数值不同的多份披露，跨期相减会混用版本，单季标为不可得。")
         A("")
 
         adv = fin_artifacts.get("adjustments", {})
@@ -1582,6 +1598,8 @@ def write_digest(out_dir, ts_code, code6, stock_name, asof, px, last, fwide, fc,
                   f"{amt('adjusted_parent_net_strip_asset_and_credit')} |")
             A("")
             scenario = adv.get("scenario", {})
+            A(f"- 调整情景版本：`{scenario.get('scenario_id', '—')}`；"
+              f"税率来源：{scenario.get('tax_rate_source', '—')}")
             A(f"- 调整情景公式：{scenario.get('formula', '—')}")
             A(f"- 情景假设：{'；'.join(str(x).rstrip('。') for x in scenario.get('assumptions', []))}。")
             A("- **调整后单季利润不得乘 4 当作可持续年利润**；它只是这次核对口径下的一个情景。")

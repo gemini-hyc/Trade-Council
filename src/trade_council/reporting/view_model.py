@@ -14,6 +14,7 @@ from typing import Any
 
 from ..decision.risk_rules import TradeContext, board_rule_for
 from ..research.gaps import GAP_LABELS
+from ..research.propagation import role_claim_refs as _role_claim_refs
 from .scoring import Scorecard
 
 SCHEMA_VERSION = "report-view-1"
@@ -47,12 +48,10 @@ QUARTER_STATUS_LABELS = {
     "missing_field": "缺字段",
 }
 
-QUARTER_STATUS_LABELS = {
-    "ok": "正常",
-    "missing_predecessor": "缺上一季，单季不可得",
-    "restated_incomparable": "重述不可比",
-    "missing_value": "缺值",
-    "missing_field": "缺字段",
+COMPARABILITY_LABELS = {
+    "confirmed": "已确认同版本",
+    "changed": "存在重述版本",
+    "unconfirmed": "单版本未确认",
 }
 
 CLAIM_STATUS_LABELS = {
@@ -70,6 +69,23 @@ def _read_json(path: Path) -> Any:
 def _label(value: object) -> str:
     text = str(value or "").strip()
     return ASSESSMENT_LABELS.get(text, text or "未提供")
+
+
+def _claim_line(claim: dict[str, Any]) -> str:
+    """One claim, with its status, evidence and reason, on one line."""
+
+    status = CLAIM_STATUS_LABELS.get(str(claim.get("status") or "intact"), "成立")
+    evidence_ids = [str(item) for item in claim.get("supporting_evidence_ids") or []]
+    counters = [str(item) for item in claim.get("counter_evidence_ids") or []]
+    detail = f"证据：{'、'.join(evidence_ids) if evidence_ids else '未标注证据 ID'}"
+    if counters:
+        detail += f"；反证：{'、'.join(counters)}"
+    if str(claim.get("status") or "intact") != "intact" and claim.get("status_reason"):
+        detail += f"；状态说明：{claim.get('status_reason')}"
+    return (
+        f"{claim.get('claim_id')}（{claim.get('kind', 'inference')}／{status}）："
+        f"{claim.get('statement', '')}｜{detail}"
+    )
 
 
 def _quarter_rows(datapack_dir: Path, limit: int = 8) -> list[dict[str, str]]:
@@ -93,6 +109,20 @@ def _adjustment_rows(datapack_dir: Path, limit: int = 8) -> list[dict[str, Any]]
 def _bridge(datapack_dir: Path) -> dict[str, Any]:
     path = datapack_dir / "earnings_bridge.json"
     return _read_json(path) if path.is_file() else {}
+
+
+def _adjustment_scenario(datapack_dir: Path) -> dict[str, Any]:
+    path = datapack_dir / "financial_adjustments.json"
+    if not path.is_file():
+        return {}
+    payload = _read_json(path)
+    scenario = payload.get("scenario") or {}
+    return {
+        "tax_rate": scenario.get("tax_rate"),
+        "tax_rate_source": scenario.get("tax_rate_source"),
+        "scenario_id": scenario.get("scenario_id"),
+        "minority_treatment": scenario.get("minority_treatment"),
+    }
 
 
 def _as_float(value: object) -> float | None:
@@ -121,12 +151,21 @@ def _financial_block(datapack_dir: Path) -> dict[str, Any]:
                 {"text": _num(row.get("revenue_q")), "numeric": True, "source": "financial_quarters.csv:revenue_q"},
                 {"text": _num(row.get("n_income_attr_p_q")), "numeric": True, "source": "financial_quarters.csv:n_income_attr_p_q"},
                 {"text": QUARTER_STATUS_LABELS.get(str(row.get("quarter_status")), str(row.get("quarter_status") or "")), "muted": True},
+                {
+                    "text": COMPARABILITY_LABELS.get(
+                        str(row.get("comparability")), str(row.get("comparability") or "未记录")
+                    ),
+                    "muted": True,
+                },
             ]
         )
     return {
         "kind": "table",
-        "caption": "单季财务（亿元）：单季营收 = 本期累计 − 上一季累计，Q1 直接用累计数",
-        "columns": ["报告期", "单季营收", "单季归母", "季度状态"],
+        "caption": (
+            "单季财务（亿元）：单季营收 = 本期累计 − 上一季累计，Q1 直接用累计数。"
+            "可比性“单版本未确认”表示本地库每期只有一份披露，无法证明与当时披露一致"
+        ),
+        "columns": ["报告期", "单季营收", "单季归母", "季度状态", "可比性"],
         "rows": body,
     }
 
@@ -183,8 +222,13 @@ def build_view_model(
     market_rules_path: Path,
     asof: str,
     scorecard: Scorecard | None = None,
+    finance_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the six reader-facing sections plus the appendix."""
+
+    # Financial numbers may come from a run-level recomputation; prices and
+    # evidence always come from the frozen pack.
+    fin = finance_dir or datapack_dir
 
     context = TradeContext(
         capital=(run.get("trade_context") or {}).get("capital"),
@@ -207,7 +251,7 @@ def build_view_model(
         if str(question.get("status")) != "answered"
         or str(question.get("question_id")) in {str(i) for i in research.get("unresolved_question_ids") or []}
     ]
-    bridge = _bridge(datapack_dir)
+    bridge = _bridge(fin)
     ttm = bridge.get("ttm") or {}
     valuation = research.get("valuation_reference") or {}
 
@@ -256,21 +300,53 @@ def build_view_model(
     )
 
     # 2. How the company makes money, and what the data covers.
-    business_role = roles.get("fundamentals-analyst") or {}
+    # This section is built from the claims filed under the business topic.
+    # A role's free-form summary used to be printed here, which meant the same
+    # question had two answers: the role text and the central claim list, and
+    # nothing detected when they disagreed. A financial quarter-on-quarter
+    # recap is also not an answer to "how does it earn money", so it is not
+    # substituted when the business claims are missing.
+    business_claims = [
+        claim for claim in claims if str(claim.get("topic") or "other") == "business"
+    ]
+    superseded = [
+        claim for claim in business_claims if str(claim.get("status") or "intact") != "intact"
+    ]
+    standing = [claim for claim in business_claims if claim not in superseded]
     business_blocks: list[dict[str, Any]] = []
-    if business_role:
+    if business_claims:
         business_blocks.append(
-            {"kind": "paragraph", "text": str(business_role.get("summary") or "（无摘要）")}
+            {
+                "kind": "paragraph",
+                "text": "本节只写登记为 business 维度的论点，每条都指向证据 ID；"
+                "财务环比与季度桥接放在第 3 节，不在这里充当业务说明。"
+                "已撤回或已降级的旧判断单列，不混在现行结论里。",
+            }
         )
-        findings = [
-            f"{item.get('claim_id')}（{item.get('kind', 'inference')}）：{item.get('claim', '')}"
-            for item in business_role.get("key_findings") or []
-        ]
-        if findings:
-            business_blocks.append({"kind": "bullets", "title": "基本面要点", "items": findings[:6]})
+        if standing:
+            business_blocks.append(
+                {
+                    "kind": "bullets",
+                    "title": "业务结构论点",
+                    "items": [_claim_line(claim) for claim in standing],
+                }
+            )
+        if superseded:
+            business_blocks.append(
+                {
+                    "kind": "bullets",
+                    "title": "已撤回或已降级的旧判断（不作为结论）",
+                    "items": [_claim_line(claim) for claim in superseded],
+                }
+            )
     else:
         business_blocks.append(
-            {"kind": "paragraph", "text": "本次运行未启用基本面角色，业务驱动的判断缺失，不能补写。"}
+            {
+                "kind": "paragraph",
+                "text": "本次运行没有登记 business 维度的论点，因此“公司如何赚钱”这个问题没有被回答。"
+                "财务数字的变化不构成业务说明，这里不补写；要补的是收入来源、成本结构与利润驱动，"
+                "并各自给出证据。",
+            }
         )
     coverage = [
         f"{gap.get('gap_id')}（{GAP_LABELS.get(str(gap.get('kind')), gap.get('kind'))}）："
@@ -287,7 +363,7 @@ def build_view_model(
     sections.append({"id": "business", "title": "2. 公司如何赚钱", "blocks": business_blocks})
 
     # 3. Financials and the quarterly bridge.
-    finance_blocks: list[dict[str, Any]] = [_financial_block(datapack_dir)]
+    finance_blocks: list[dict[str, Any]] = [_financial_block(fin)]
     ttm_text = []
     for field, label in (("n_income_attr_p", "归母净利润"), ("revenue", "营业收入")):
         item = ttm.get(field) or {}
@@ -303,11 +379,19 @@ def build_view_model(
             + ("；".join(ttm_text) if ttm_text else "本次没有可用的滚动数据"),
         }
     )
-    finance_blocks.append(_profit_lines_block(datapack_dir))
+    finance_blocks.append(_profit_lines_block(fin))
+    scenario = _adjustment_scenario(fin)
+    tax_rate = scenario.get("tax_rate")
+    rate_text = f"{float(tax_rate):.0%}" if isinstance(tax_rate, (int, float)) else "未记录"
+    source_text = {
+        "scenario": "本次运行输入的税率",
+        "default": "模块默认税率，可被运行参数覆盖",
+    }.get(str(scenario.get("tax_rate_source") or ""), "来源未记录")
     finance_blocks.append(
         {
             "kind": "paragraph",
-            "text": "调整情景的假设：统一按 23% 税率重算所得税、少数股东损益沿用报表实际数；"
+            "text": f"调整情景的假设：统一按 {rate_text} 税率重算所得税（{source_text}）、"
+            "少数股东损益沿用报表实际数；"
             "源表缺少利润总额、资产减值、少数股东损益或所得税任一项时，该季调整归母标为不可得，不做部分推算。"
             "调整后单季利润不是可持续年利润，不得乘以 4 年化。",
         }
@@ -419,13 +503,28 @@ def build_view_model(
     ]
     sections.append({"id": "next", "title": "6. 下一次检查", "blocks": next_blocks})
 
+    known_claim_ids = {str(claim.get("claim_id")) for claim in claims}
     appendix = {
+        "role_note": (
+            "角色摘要保留为原始记录，不是结论来源：正文只引用中央论点表。"
+            "每条角色摘要列出它引用的论点，凡引用不存在或已变更的论点都在此处标出。"
+        ),
         "roles": [
             {
                 "role_id": role_id,
                 "stance": payload.get("stance", ""),
                 "summary": payload.get("summary", ""),
                 "key_findings": payload.get("key_findings") or [],
+                "claim_refs": sorted(_role_claim_refs(payload)),
+                "unknown_claim_refs": sorted(_role_claim_refs(payload) - known_claim_ids),
+                "changed_claim_refs": sorted(
+                    _role_claim_refs(payload)
+                    & {
+                        str(claim.get("claim_id"))
+                        for claim in claims
+                        if str(claim.get("status") or "intact") != "intact"
+                    }
+                ),
             }
             for role_id, payload in roles.items()
         ],

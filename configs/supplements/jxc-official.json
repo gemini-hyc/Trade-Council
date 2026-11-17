@@ -1,0 +1,31 @@
+{
+  "periods": {
+    "20260331": {
+      "deduct_parent": 3126322051,
+      "credit_impair": 12119213,
+      "url": "https://static.cninfo.com.cn/finalpage/2026-04-29/1225226781.PDF",
+      "location": "合并利润表第11页；主要指标第2页",
+      "unit": "元",
+      "ts_code": "600362.SH",
+      "available_at": "2026-04-29"
+    },
+    "20260630": {
+      "deduct_parent": 7556196885,
+      "credit_impair": -23497011,
+      "url": "https://static.cninfo.com.cn/finalpage/2026-08-26/1225505938.PDF",
+      "location": "合并利润表；主要会计数据",
+      "unit": "元",
+      "ts_code": "600362.SH",
+      "available_at": "2026-08-26"
+    },
+    "20260930": {
+      "deduct_parent": 10239058822,
+      "credit_impair": -24882862,
+      "url": "https://static.cninfo.com.cn/finalpage/2026-10-29/1225636802.PDF",
+      "location": "合并利润表第10页；主要指标第1页",
+      "unit": "元",
+      "ts_code": "600362.SH",
+      "available_at": "2026-10-29"
+    }
+  }
+}

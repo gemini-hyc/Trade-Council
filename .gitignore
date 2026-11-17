@@ -12,3 +12,5 @@ runs/*
 *.parquet
 *.jsonl
 *.log
+datapacks/
+.workbuddy/

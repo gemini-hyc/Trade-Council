@@ -36,11 +36,18 @@ from .operations.runs import (
     summarize_calls,
 )
 from .orchestration.current_agent import prepare_current_agent_task
-from .orchestration.finalization import finalize_run, load_finalization, validate_run
+from .orchestration.finalization import (
+    finalize_run,
+    load_finalization,
+    submit_analysis,
+    validate_run,
+    verify_seal,
+)
 from .orchestration.workflow import WorkflowEngine
 from .reporting.build import build_report
 from .research.evidence_import import import_evidence
-from .research.propagation import record_revision
+from .research.propagation import record_revision, review_output
+from .research.recompute import recompute_financials
 
 
 def _project_root(value: str) -> Path:
@@ -91,6 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_parser.add_argument("--include-news", action="store_true")
     data_parser.add_argument("--official-metrics", default=None,
                              help="官方扣非/信用减值补录 JSON（结构化，含来源与期间）")
+    data_parser.add_argument("--adjustment-tax-rate", type=float, default=None,
+                             help="调整情景统一税率，0~1 小数（默认 0.23，仅为本模块假设）")
     data_parser.add_argument("--root", default=".", type=_project_root)
     data_parser.set_defaults(handler=_data)
 
@@ -131,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--datapack", default=None)
     analyze_parser.add_argument("--official-metrics", default=None,
                                 help="官方扣非/信用减值补录 JSON（结构化，含来源与期间）")
+    analyze_parser.add_argument("--adjustment-tax-rate", type=float, default=None,
+                                help="调整情景统一税率，0~1 小数（默认 0.23，仅为本模块假设）")
     analyze_parser.add_argument("--run-id", default=None)
     analyze_parser.add_argument("--run-kind", choices=["normal", "golden"], default="normal")
     analyze_parser.add_argument("--capital", type=float, default=None)
@@ -155,6 +166,15 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--root", default=".", type=_project_root)
     validate_parser.add_argument("--json", action="store_true")
     validate_parser.set_defaults(handler=_validate)
+
+    submit_parser = subparsers.add_parser(
+        "submit",
+        help="Mark a prepared run as analysed after checking the required products exist.",
+    )
+    submit_parser.add_argument("--run-id", required=True)
+    submit_parser.add_argument("--root", default=".", type=_project_root)
+    submit_parser.add_argument("--json", action="store_true")
+    submit_parser.set_defaults(handler=_submit)
 
     finalize_parser = subparsers.add_parser(
         "finalize", help="Validate, run deterministic risk checks, build and seal the report."
@@ -188,6 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--run-id", required=True)
     export_parser.add_argument("--out-dir", default=None)
     export_parser.add_argument("--root", default=".", type=_project_root)
+    export_parser.add_argument(
+        "--historical",
+        action="store_true",
+        help="导出已封存但依赖已变化的历史版本，文件名会标注，不能当作当前有效报告",
+    )
     export_parser.set_defaults(handler=_export)
 
     research_parser = subparsers.add_parser(
@@ -212,6 +237,26 @@ def build_parser() -> argparse.ArgumentParser:
     revise_parser.add_argument("--root", default=".", type=_project_root)
     revise_parser.add_argument("--json", action="store_true")
     revise_parser.set_defaults(handler=_research_revise)
+
+    review_parser = research_sub.add_parser(
+        "review",
+        help="Close exactly one pending (output, revision) pair after re-checking it.",
+    )
+    review_parser.add_argument("--run-id", required=True)
+    review_parser.add_argument("--file", required=True, type=Path)
+    review_parser.add_argument("--root", default=".", type=_project_root)
+    review_parser.add_argument("--json", action="store_true")
+    review_parser.set_defaults(handler=_research_review)
+
+    recompute_parser = research_sub.add_parser(
+        "recompute",
+        help="Recompute financial scenarios at run level without editing the frozen pack.",
+    )
+    recompute_parser.add_argument("--run-id", required=True)
+    recompute_parser.add_argument("--file", required=True, type=Path)
+    recompute_parser.add_argument("--root", default=".", type=_project_root)
+    recompute_parser.add_argument("--json", action="store_true")
+    recompute_parser.set_defaults(handler=_research_recompute)
 
     return parser
 
@@ -288,6 +333,7 @@ def _build_frozen_datapack(
     include_news: bool,
     name: str | None = None,
     official_metrics: Path | None = None,
+    adjustment_tax_rate: float | None = None,
 ) -> Path:
     """Build into a staging directory, then publish under the snapshot id."""
 
@@ -304,6 +350,7 @@ def _build_frozen_datapack(
             include_news=include_news,
             data_root=Path(config.data.quant_data_root).expanduser(),
             official_metrics_path=official_metrics,
+            adjustment_tax_rate=adjustment_tax_rate,
         )
         snapshot = str(manifest.get("snapshot_id") or "unknown")
         target = root / snapshot
@@ -362,6 +409,7 @@ def _data(args: argparse.Namespace) -> int:
             include_news=args.include_news,
             data_root=Path(config.data.quant_data_root).expanduser(),
             official_metrics_path=Path(args.official_metrics) if args.official_metrics else None,
+            adjustment_tax_rate=args.adjustment_tax_rate,
         )
     else:
         datapack = _build_frozen_datapack(
@@ -373,6 +421,7 @@ def _data(args: argparse.Namespace) -> int:
             include_news=args.include_news,
             name=args.name,
             official_metrics=Path(args.official_metrics) if args.official_metrics else None,
+            adjustment_tax_rate=args.adjustment_tax_rate,
         )
         manifest = cast(dict[str, Any], json.loads((datapack / "manifest.json").read_text(encoding="utf-8")))
         manifest["data_pack_dir"] = str(datapack)
@@ -529,6 +578,7 @@ def _analyze(args: argparse.Namespace) -> int:
                 include_news=args.include_news,
                 data_root=Path(config.data.quant_data_root).expanduser(),
                 official_metrics_path=official_metrics,
+                adjustment_tax_rate=args.adjustment_tax_rate,
             )
         datapack = _adopt_datapack(config, source, code6)
     elif args.resume and existing.get("input_binding", {}).get("datapack_dir"):
@@ -545,6 +595,7 @@ def _analyze(args: argparse.Namespace) -> int:
             years=args.years,
             include_news=args.include_news,
             official_metrics=official_metrics,
+            adjustment_tax_rate=args.adjustment_tax_rate,
         )
 
     trade_context = TradeContext(
@@ -621,10 +672,6 @@ def _report(args: argparse.Namespace) -> int:
     if not state_path.is_file():
         print(f"error: run not found: {run_dir}", file=sys.stderr)
         return 2
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    if state.get("status") in {"AWAITING_CURRENT_AGENT", "DATA_READY"}:
-        print("error: analysis is not complete; cannot render a final report", file=sys.stderr)
-        return 2
     # Rendering also re-checks the binding and artifacts: editing run.json by
     # hand must not be enough to bypass validation.
     report = validate_run(config, args.run_id)
@@ -660,6 +707,21 @@ def _validate(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _submit(args: argparse.Namespace) -> int:
+    config = load_project_config(args.root)
+    record = submit_analysis(config, args.run_id)
+    if args.json:
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+    else:
+        print(f"run {args.run_id}: {'SUBMITTED' if record['ok'] else 'NOT SUBMITTED'}")
+        print(f"  状态：{record.get('status', '—')}  {record.get('reason', '')}".rstrip())
+        for failure in record.get("failures", []):
+            print(f"  [FAIL] {failure['code']}: {failure['message']}")
+        for todo in record.get("todos", []):
+            print(f"   - {todo}")
+    return 0 if record["ok"] else 1
+
+
 def _finalize(args: argparse.Namespace) -> int:
     config = load_project_config(args.root)
     record = finalize_run(config, args.run_id)
@@ -686,12 +748,21 @@ def _research_import(args: argparse.Namespace) -> int:
     run_dir = _run_dir(config, args.run_id)
     run = _read_run(run_dir)
     payload = json.loads(args.file.expanduser().read_text(encoding="utf-8"))
+    reserved: set[str] = set()
+    datapack = Path(str(run.get("data_pack_dir") or ""))
+    evidence_path = datapack / "evidence.json"
+    if evidence_path.is_file():
+        reserved = {
+            str(item.get("evidence_id"))
+            for item in json.loads(evidence_path.read_text(encoding="utf-8")).get("items", [])
+        }
     result = import_evidence(
         run_dir,
         payload,
         symbol=str(run.get("symbol") or ""),
         asof=str(run.get("asof") or "")[:10],
         source_label=str(args.file),
+        reserved_ids=reserved,
     )
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -720,6 +791,53 @@ def _research_revise(args: argparse.Namespace) -> int:
             print(f"  失效传播到：{', '.join(outcome['propagated_claim_ids'])}")
         pending = outcome["run_state"].get("pending_review_outputs") or []
         print(f"  待复核输出：{', '.join(pending) if pending else '无'}")
+    return 0
+
+
+def _research_review(args: argparse.Namespace) -> int:
+    config = load_project_config(args.root)
+    run_dir = _run_dir(config, args.run_id)
+    payload = json.loads(args.file.expanduser().read_text(encoding="utf-8"))
+    try:
+        outcome = review_output(run_dir, payload)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(outcome, ensure_ascii=False, indent=2))
+    elif outcome.get("role"):
+        print(f"run {args.run_id}: 已重审角色 {outcome['role']}（修订 {outcome['revision_id']}）")
+        pending_roles = outcome["pending_role_reviews"]
+        print(
+            "  仍待重审的角色："
+            + (
+                ", ".join(item["role"] + "@" + item["revision_id"] for item in pending_roles)
+                or "无"
+            )
+        )
+    else:
+        print(f"run {args.run_id}: 已复核 {outcome['output']}（修订 {outcome['revision_id']}）")
+        pending = outcome["pending_reviews"]
+        print(f"  仍待复核：{', '.join(item['output'] + '@' + item['revision_id'] for item in pending) or '无'}")
+    return 0
+
+
+def _research_recompute(args: argparse.Namespace) -> int:
+    config = load_project_config(args.root)
+    run_dir = _run_dir(config, args.run_id)
+    payload = json.loads(args.file.expanduser().read_text(encoding="utf-8"))
+    try:
+        record = recompute_financials(run_dir, payload)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+    else:
+        print(f"run {args.run_id}: 已按情景 {record['scenario_id']} 重算财务")
+        print(f"  税率：{record['adjustment_tax_rate']:.0%}（{record['tax_rate_source']}）")
+        print(f"  输出：{record['scenario_id']}（run.recompute 目录，冻结数据包未改动）")
+        print("  重新 validate 与 finalize 才会进入报告")
     return 0
 
 
@@ -816,12 +934,36 @@ def _export(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # A sealed report may only be exported while every dependency still matches.
+    # Otherwise the old bytes would be presented as the current conclusion.
+    problems = verify_seal(config, args.run_id)
+    if problems:
+        if not args.historical:
+            print(
+                "error: 封存依赖已变化，旧报告不能当作当前有效报告导出：",
+                file=sys.stderr,
+            )
+            for problem in problems:
+                print(f"  - {problem}", file=sys.stderr)
+            print(
+                "  处理：重新 validate 与 finalize 生成新封存；如确需保留旧版，"
+                "用 --historical 导出并标注为历史版本。",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            "warning: 依赖已变化，本次按历史版本导出，文件名会标注，不能当作当前有效结论",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else None
     target = export_report(
         args.root,
         args.run_id,
         out_dir=out_dir,
         runs_root=config.root / config.app.run_dir,
+        label="已封存历史版本" if problems else "",
     )
     print(str(target))
     return 0

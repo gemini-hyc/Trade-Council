@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..decision.risk_rules import BoardRule, TradeContext, board_rule_for, t_plus_one_blocked
 from ..engineering.evidence import infer_value_type
+from ..research.recompute import finance_dir
 from .audit import audit_report
 from .scoring import Scorecard, load_scorecard
 from .view_model import build_view_model
@@ -262,6 +263,7 @@ def build_view(
         market_rules_path=market_rules_path,
         asof=str(run.get("asof", ""))[:10],
         scorecard=scorecard,
+        finance_dir=finance_dir(run, datapack_dir),
     )
 
 
@@ -320,9 +322,25 @@ def render_markdown(view: dict[str, Any]) -> str:
             lines.extend(_md_block(block))
     appendix = view["appendix"]
     lines.extend(["## 附录", ""])
+    lines.append(f"> {appendix.get('role_note', '')}")
+    lines.append("")
     lines.extend(["### 实际启用角色", ""])
     for role in appendix["roles"]:
-        lines.append(f"- `{role['role_id']}`（{role.get('stance') or '未标注立场'}）：{role.get('summary', '')}")
+        lines.append(
+            f"- `{role['role_id']}`（{role.get('stance') or '未标注立场'}）：{role.get('summary', '')}"
+        )
+        refs = role.get("claim_refs") or []
+        if refs:
+            lines.append(f"  - 引用论点：{'、'.join(refs)}")
+        if role.get("unknown_claim_refs"):
+            lines.append(
+                f"  - 引用了中央论点表里不存在的 ID：{'、'.join(role['unknown_claim_refs'])}"
+            )
+        if role.get("changed_claim_refs"):
+            lines.append(
+                "  - 引用的论点已变更，需对照中央论点表重读："
+                + "、".join(role["changed_claim_refs"])
+            )
     lines.append("")
     if appendix["debate"]:
         lines.extend(["### 多空最强论点", ""])
@@ -527,7 +545,20 @@ def render_html(
             f"<code>{html_module.escape(', '.join(item.get('evidence_ids') or []))}</code></li>"
             for item in role.get("key_findings") or []
         )
-        + "</ul></details>"
+        + "</ul>"
+        + (
+            f'<p data-role-claims="unknown">引用了中央论点表里不存在的 ID：'
+            f'{html_module.escape("、".join(role["unknown_claim_refs"]))}</p>'
+            if role.get("unknown_claim_refs")
+            else ""
+        )
+        + (
+            f'<p data-role-claims="changed">引用的论点已变更，需对照中央论点表重读：'
+            f'{html_module.escape("、".join(role["changed_claim_refs"]))}</p>'
+            if role.get("changed_claim_refs")
+            else ""
+        )
+        + "</details>"
         for role in appendix["roles"]
     )
     debate_html = "".join(
@@ -608,7 +639,8 @@ details{{border-top:1px solid #e2e8f0;padding:8px 0}}
 {''.join(sections_html)}
 {scorecard_html}
 <section class="card" data-appendix="true"><h2>附录</h2>
-<h3>实际启用角色（{len(appendix['roles'])} 个）</h3>{role_html or '<p>无角色产物</p>'}
+<h3>实际启用角色（{len(appendix['roles'])} 个）</h3>
+<p class="muted">{html_module.escape(str(appendix.get('role_note', '')))}</p>{role_html or '<p>无角色产物</p>'}
 {debate_html}
 <h3>数据缺口</h3><ul>{gap_html or '<li>未登记缺口</li>'}</ul>
 <h3>决策层缺口</h3><ul>{decision_gap_html or '<li>无已记录缺口</li>'}</ul>
@@ -697,7 +729,11 @@ def build_report(run_dir: Path, datapack_dir: Path) -> dict[str, Any]:
         market_rules_path=market_rules_path,
     )
     data_gaps = decision.get("data_gaps", [])
-    allow_trade = bool(run.get("capability_flags", {}).get("trade_instructions", False))
+    # Executable trade instructions need a real account context, not a flag the
+    # analysing agent wrote about itself.
+    allow_trade = bool(
+        run.get("capability_flags", {}).get("trade_instructions", False)
+    ) and trade_context.position_size_allowed
     audit = audit_report(
         document,
         decision=decision,
